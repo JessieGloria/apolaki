@@ -186,7 +186,7 @@ function renderLogin(msg) {
   $("#tabs").hidden = true; $("#top").hidden = true;
   $("#view").innerHTML = `
   <div class="login">
-    <div class="mark"><svg viewBox="0 0 512 512" aria-hidden="true"><rect width="512" height="512" rx="110" fill="#2F5D50"/><path d="M256 104 L408 384 H104 Z" fill="none" stroke="#E2C27A" stroke-width="34" stroke-linejoin="round"/><path d="M200 300 L256 214 L312 300" fill="none" stroke="#E2C27A" stroke-width="26" stroke-linejoin="round" stroke-linecap="round"/></svg></div>
+    <div class="mark"><img src="icon.svg" alt="Apolaki" width="64" height="64"></div>
     <h1>Welcome<br>back!</h1>
     <p class="muted">One piece, one sale, one market at a time.</p>
     ${msg ? `<p class="tag rust" style="margin-bottom:10px">${esc(msg)}</p>` : ""}
