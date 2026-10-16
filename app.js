@@ -7,7 +7,7 @@ const sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseKey);
 const state = {
   user: null, tab: "home",
   products: [], locations: [], stock: [],
-  sellAt: localGet("sellAt", null), sellCat: localGet("sellCat", "all"), cart: {}, payment: "Cash", discount: 0,
+  sellAt: localGet("sellAt", null), sellCat: localGet("sellCat", "all"), cart: {}, custom: [], finalPrice: null, pop: localGet("pop", {}), payment: "Cash", discount: 0,
   stockLoc: "all", search: "", codes: [], openCats: new Set()
 };
 
@@ -46,7 +46,11 @@ const uuid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now() + "-" +
 function localGet(k, d) { try { const v = localStorage.getItem("apolaki:" + k); return v === null ? d : JSON.parse(v); } catch { return d; } }
 function localSet(k, v) { try { localStorage.setItem("apolaki:" + k, JSON.stringify(v)); } catch {} }
 
-function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 2600); }
+function toast(msg, action) {
+  const t = $("#toast"); t.textContent = msg; t.classList.toggle("has-action", !!action);
+  if (action) { const b = document.createElement("button"); b.type = "button"; b.textContent = action.label; b.onclick = () => { t.classList.remove("show"); clearTimeout(toast.t); action.run(); }; t.append(" ", b); }
+  t.classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), action ? 7000 : 2600);
+}
 /* data entry opens as its own page (slides in from the right); Back returns to the previous page */
 let sheetTimer, pageStack = [];
 function showPage(entry) {
@@ -104,8 +108,9 @@ const CAT_SVG = {
   "Neck Piece": '<path d="M4 3.5c0 6.5 3.6 10.5 8 10.5s8-4 8-10.5"/><path d="M12 14v1.6"/><path d="m12 15.6-2.2 3 2.2 2.4 2.2-2.4z"/>',
   Other: '<path d="M6.5 4h11l3.5 5-9 11L3 9z"/><path d="M3 9h18M9 4l3 16 3-16"/>'
 };
-const catSvg = c => `<svg viewBox="0 0 24 24" class="jw">${CAT_SVG[c] || CAT_SVG.Other}</svg>`;
-const catIco = c => `<span class="cat-ico ${catG(c)}">${catSvg(c)}</span>`;
+/* no jewellery icons: categories are told apart by colour only */
+const catSvg = c => "";
+const catIco = c => `<span class="cat-bar ${catG(c)}"></span>`;
 function groupByCategory(ps) {
   const g = {}; ps.forEach(p => (g[p.category || "Other"] = g[p.category || "Other"] || []).push(p));
   return Object.entries(g).sort((a, b) => ((CAT_ORDER.indexOf(a[0]) + 1) || 99) - ((CAT_ORDER.indexOf(b[0]) + 1) || 99) || a[0].localeCompare(b[0]))
@@ -178,7 +183,7 @@ async function sync() {
     const sent = new Set(rows.map(r => r.client_id));
     setOutbox(outbox().filter(r => !sent.has(r.client_id)));
     await loadStock();
-    if (state.tab === "market") render();
+    if (state.tab === "market" && !state.editPrice) { state.todayJson = null; render(); }
   } catch (e) { console.warn("sync later", e); }
   syncing = false; updateBadge();
 }
@@ -197,7 +202,7 @@ async function loadAll() {
     ]);
     state.products = p; state.locations = l; state.codes = c;
     localSet("products", p); localSet("locations", l); localSet("codes", c);
-    await loadStock();
+    await loadStock(); loadPopular();
   } catch (e) {
     state.products = localGet("products", []); state.locations = localGet("locations", []); state.stock = localGet("stock", []); state.codes = localGet("codes", []);
     toast("Offline. Showing the last saved copy.");
@@ -480,19 +485,54 @@ function sizeGroups(products, locId) {
   for (const p of products) {
     const sz = sizeShort(p.size);
     const key = sz ? (p.family || "") + "|" + baseName(p.name).toLowerCase() : "sku|" + p.sku;
-    if (!map.has(key)) map.set(key, { key, name: nice(sz ? baseName(p.name) : p.name), items: [] });
+    if (!map.has(key)) map.set(key, { key, name: "", items: [] });
     map.get(key).items.push({ p, size: sz || p.size || "", left: stockAt(locId, p.sku) });
   }
   const list = [...map.values()].map(g => {
-    if (g.items.length === 1) g.name = nice(g.items[0].p.name);
+    /* tile name: the short name if one is set (on any size), otherwise the full name without the size */
+    const short = (g.items.find(it => it.p.short_name) || {}).p?.short_name;
+    g.name = g.items.length === 1 ? nice(short || g.items[0].p.name) : nice(baseName(short || g.items[0].p.name));
     g.items.sort((a, b) => SIZE_ORDER.indexOf(a.size) - SIZE_ORDER.indexOf(b.size));
     g.left = g.items.reduce((t, it) => t + Math.max(0, it.left), 0);
     return g;
   });
   return list.sort((a, b) => (b.left > 0) - (a.left > 0) || a.name.localeCompare(b.name));
 }
-function cartLines() { return Object.entries(state.cart).filter(([, n]) => n > 0).map(([sku, n]) => ({ p: prod(sku), qty: n })); }
-function cartGross() { return cartLines().reduce((t, l) => t + l.qty * Number(l.p.retail_price), 0); }
+function cartLines() {
+  return Object.entries(state.cart).filter(([sku, n]) => n > 0 && prod(sku)).map(([sku, n]) => ({ p: prod(sku), qty: n }))
+    .concat((state.custom || []).filter(c => c.qty > 0).map(c => ({ p: { sku: null, name: c.name, retail_price: c.price }, qty: c.qty, custom: c.id })));
+}
+function cartGross() { return round2(cartLines().reduce((t, l) => t + l.qty * Number(l.p.retail_price), 0)); }
+const cartPieces = () => cartLines().reduce((x, l) => x + l.qty, 0);
+const cartTotal = () => state.finalPrice != null ? round2(state.finalPrice) : cartGross();
+function clearCart() { state.cart = {}; state.custom = []; state.finalPrice = null; state.discount = 0; state.editPrice = false; }
+/* how much each piece sold for and units per piece over the last 6 months, for "Popular" */
+async function loadPopular() {
+  try {
+    const since = new Date(Date.now() - 183 * 864e5).toISOString();
+    const rows = await q(live("sales", "sku,qty").not("sku", "is", null).gte("sold_at", since));
+    const pop = {}; rows.forEach(r => pop[r.sku] = (pop[r.sku] || 0) + (r.qty || 0));
+    state.pop = pop; localSet("pop", pop);
+  } catch { state.pop = localGet("pop", {}); }
+}
+/* today's sales where you're selling now (saved ones + ones still on the phone) */
+async function loadToday(t) {
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  try {
+    const rows = await q(live("sales", "client_id,cart_id,amount,payment_method,qty").eq("location_id", t.locationId).eq("channel", t.channel).gte("sold_at", start.toISOString()));
+    const key = t.key + "|" + ymd(start), fresh = JSON.stringify(rows);
+    if (state.todayKey !== key || state.todayJson !== fresh) { state.todayKey = key; state.todayJson = fresh; state.todayRows = rows; return true; }
+  } catch {}
+  return false;
+}
+function todaySummary(t) {
+  const start = new Date(); start.setHours(0, 0, 0, 0);
+  const local = outbox().filter(r => r.location_id === t.locationId && r.channel === t.channel && new Date(r.sold_at) >= start);
+  const server = (state.todayKey || "").startsWith(t.key + "|") ? (state.todayRows || []) : [];
+  const all = local.concat(server.filter(s => !local.some(l => l.client_id === s.client_id)));
+  const by = {}; all.forEach(r => by[r.payment_method || "Other"] = (by[r.payment_method || "Other"] || 0) + Number(r.amount));
+  return { sales: new Set(all.map(r => r.cart_id || r.client_id)).size, total: all.reduce((x, r) => x + Number(r.amount), 0), by };
+}
 
 async function renderSell() {
   const view = $("#view");
@@ -509,8 +549,13 @@ async function renderSell() {
   const s = state.search.toLowerCase();
   const groups = sizeGroups(activeProducts().filter(p => !s || p.name.toLowerCase().includes(s) || (p.family || "").toLowerCase().includes(s)), t.stockLoc);
   const cats = [...new Set(activeProducts().map(p => p.category || "Other"))].sort((a, b) => ((CAT_ORDER.indexOf(a) + 1) || 99) - ((CAT_ORDER.indexOf(b) + 1) || 99) || a.localeCompare(b));
-  const cat = state.sellCat && (state.sellCat === "all" || cats.includes(state.sellCat)) ? state.sellCat : "all";
-  const n = cartLines().reduce((x, l) => x + l.qty, 0);
+  const cat = state.sellCat && (state.sellCat === "all" || state.sellCat === "popular" || cats.includes(state.sellCat)) ? state.sellCat : "all";
+  /* best sellers first: in stock first, then most sold in the last 6 months */
+  const score = g => g.items.reduce((x, it) => x + (state.pop[it.p.sku] || 0), 0);
+  groups.sort((a, b) => (b.left > 0) - (a.left > 0) || score(b) - score(a) || a.name.localeCompare(b.name));
+  const popular = groups.filter(g => score(g) > 0).slice(0, 12);
+  const today = todaySummary(t);
+  const n = cartPieces();
   document.body.classList.toggle("has-cart", n > 0);
   const pic = p => { const img = photo(p); return img ? `<img src="${img}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph ${catG(p.category)}',innerHTML:this.dataset.ico}))" data-ico="${esc(catSvg(p.category))}">` : `<div class="ph ${catG(p.category)}">${catSvg(p.category)}</div>`; };
   const stepper = (sku, qty) => `<span class="stepper"><button type="button" data-dec="${sku}" aria-label="One fewer">−</button><b>${qty}</b><button type="button" data-inc="${sku}" aria-label="One more">+</button></span>`;
@@ -536,6 +581,7 @@ async function renderSell() {
   };
   view.innerHTML = `<h1 class="big">Sell at<br>the market</h1>
     <label class="field"><span>Selling at</span><select id="sellAt">${choices}</select></label>
+    <button type="button" class="today-strip" id="todayStrip"><span><b>Today</b> · ${today.sales} sale${today.sales === 1 ? "" : "s"}</span><strong>${RM(today.total)}</strong>${Object.entries(today.by).map(([k, v]) => `<span class="tp">${esc(k)} ${RM(v)}</span>`).join("")}${CHEV}</button>
     <div class="btns">
       ${t.market ? `<button class="btn" id="bring">Bring stock</button>` : ""}
       <button class="btn" id="today">Today's sales</button>
@@ -543,9 +589,16 @@ async function renderSell() {
       ${t.market ? `<button class="btn danger" id="endMarket">End market</button>` : ""}
     </div>
     <input class="search" id="search" type="search" placeholder="Search pieces" value="${esc(state.search)}">
-    <div class="ttabs sell-tabs">${[["all", "All"], ...cats.map(c => [c, CAT_PLURAL[c] || c])].map(([k, l]) => `<button type="button" data-cat="${esc(k)}" aria-pressed="${cat === k}">${esc(l)}</button>`).join("")}</div>
-    <div id="grid">${(cat === "all" ? cats : [cat]).map(c => { const gs = groups.filter(g => (g.items[0].p.category || "Other") === c); return gs.length ? (cat === "all" ? `<div class="cat-h">${catIco(c)}<span>${esc(CAT_PLURAL[c] || c)}</span><b>${gs.length}</b></div>` : "") + `<div class="grid sm">${gs.map(tileHtml).join("")}</div>` : ""; }).join("") || `<div class="empty">No pieces match.</div>`}</div>
-    ${n ? `<div class="cartbar"><div><div class="small">${n} piece${n > 1 ? "s" : ""} in this sale · <button type="button" class="link" id="clearCart">Clear</button></div><div class="num" style="font-size:20px;font-weight:700">${RM(cartGross())}</div></div><button class="btn" id="review">Continue</button></div>` : ""}`;
+    <div class="ttabs sell-tabs">${[...(popular.length ? [["popular", "Popular"]] : []), ["all", "All"], ...cats.map(c => [c, CAT_PLURAL[c] || c])].map(([k, l]) => `<button type="button" class="ctab ${k === "all" || k === "popular" ? "c-all" : catG(k)}" data-cat="${esc(k)}" aria-pressed="${cat === k}">${esc(l)}</button>`).join("")}</div>
+    <button type="button" class="other-btn" id="otherPiece">+ Other piece (not in the app)</button>
+    <div id="grid">${cat === "popular" ? `<div class="grid sm">${popular.map(tileHtml).join("")}</div>` : (cat === "all" ? cats : [cat]).map(c => { const gs = groups.filter(g => (g.items[0].p.category || "Other") === c); return gs.length ? (cat === "all" ? `<div class="cat-h"><span class="cat-pill ${catG(c)}">${esc(CAT_PLURAL[c] || c)}</span><b>${gs.length}</b></div>` : "") + `<div class="grid sm">${gs.map(tileHtml).join("")}</div>` : ""; }).join("") || `<div class="empty">No pieces match.</div>`}</div>
+    ${n ? `<div class="cartbar">
+      <div class="cb-info">
+        <div class="small">${n} piece${n > 1 ? "s" : ""} · <button type="button" class="link" id="review">Details</button> · <button type="button" class="link" id="clearCart">Clear</button></div>
+        ${state.editPrice ? `<div class="cb-price"><input id="finalIn" type="number" inputmode="decimal" min="0" step="0.01" placeholder="${cartGross().toFixed(2)}" value="${state.finalPrice ?? ""}"><button type="button" class="link" id="finalOk">OK</button></div>`
+          : `<button type="button" class="cb-total" id="editPrice" title="Tap to type the final price"><span class="num">${RM(cartTotal())}</span>${state.finalPrice != null && cartTotal() !== cartGross() ? `<s>${RM(cartGross())}</s>` : `<em>edit</em>`}</button>`}
+      </div>
+      <div class="cb-pay"><button type="button" class="btn pay" data-paynow="Cash">Cash</button><button type="button" class="btn pay" data-paynow="QR">QR</button></div></div>` : ""}`;
   $("#sellAt").onchange = e => { state.sellAt = e.target.value; localSet("sellAt", e.target.value); state.cart = {}; state.openGroup = null; render(); };
   $("#search").oninput = e => { state.search = e.target.value; const pos = e.target.selectionStart; render(); const i = $("#search"); i.focus(); i.setSelectionRange(pos, pos); };
   const add = sku => {
@@ -564,7 +617,17 @@ async function renderSell() {
     const one = e.target.closest("[data-add]");
     if (one) { add(one.dataset.add); render(); }
   };
-  if ($("#clearCart")) $("#clearCart").onclick = () => { state.cart = {}; state.discount = 0; state.openGroup = null; toast("Cart cleared"); render(); };
+  if ($("#clearCart")) $("#clearCart").onclick = () => { clearCart(); state.openGroup = null; toast("Cart cleared"); render(); };
+  $("#otherPiece").onclick = otherPieceSheet;
+  $("#todayStrip").onclick = () => todaySheet(t);
+  view.querySelectorAll("[data-paynow]").forEach(b => b.onclick = () => { state.payment = b.dataset.paynow; state.openGroup = null; completeSale(t, b.dataset.paynow); });
+  const ep = $("#editPrice"); if (ep) ep.onclick = () => { state.editPrice = true; render(); const i = $("#finalIn"); if (i) i.focus(); };
+  const fi = $("#finalIn");
+  if (fi) {
+    const apply = () => { const v = fi.value.trim(); state.finalPrice = v === "" ? null : Math.max(0, Number(v) || 0); state.editPrice = false; render(); };
+    $("#finalOk").onclick = apply; fi.onkeydown = e => { if (e.key === "Enter") apply(); };
+  }
+  loadToday(t).then(changed => { if (changed && state.tab === "market" && $("#sheet").hidden && !state.editPrice) render(); });
   $("#newMarket").onclick = newMarketSheet;
   $("#today").onclick = () => todaySheet(t);
   if ($("#review")) $("#review").onclick = () => reviewSheet(t);
@@ -574,43 +637,78 @@ async function renderSell() {
 
 function reviewSheet(t) {
   const draw = () => {
-    const lines = cartLines(), gross = cartGross(), disc = Math.min(Number(state.discount) || 0, gross);
+    const lines = cartLines(), gross = cartGross(), total = cartTotal();
     openSheet(`
-      <h2 style="margin-top:0">Sale at ${esc(t.name)}</h2>
-      <div class="list tight">${lines.map(l => `<div class="row"><div class="grow"><div class="title">${esc(nice(l.p.name))}</div><div class="small muted">${RM(l.p.retail_price)} each</div></div>
-        <button class="chip" data-d="-1" data-sku="${l.p.sku}" aria-label="One fewer">−</button><span class="num">${l.qty}</span><button class="chip" data-d="1" data-sku="${l.p.sku}" aria-label="One more">+</button></div>`).join("")}</div>
-      <label class="field"><span>Discount on this sale (RM)</span><input id="disc" type="number" inputmode="decimal" min="0" step="0.01" value="${state.discount || ""}"></label>
-      <div class="chips">${PAYMENTS.map(p => `<button class="chip" data-pay="${p}" aria-pressed="${state.payment === p}">${p}</button>`).join("")}</div>
-      <div class="row" style="margin:12px 0"><span>Total</span><strong class="num" style="font-size:22px">${RM(gross - disc)}</strong></div>
-      <button class="btn primary block" id="complete">Complete sale</button>
-      <div class="btns"><button class="btn" id="clear">Clear cart</button><button class="btn" id="close">Keep selling</button></div>`, root => {
-      root.querySelectorAll("[data-d]").forEach(b => b.onclick = () => { state.cart[b.dataset.sku] = Math.max(0, (state.cart[b.dataset.sku] || 0) + Number(b.dataset.d)); if (!cartLines().length) { closeSheet(); render(); } else draw(); });
+      <h2>Sale at ${esc(t.name)}</h2>
+      <div class="list tight">${lines.map(l => `<div class="row"><div class="grow"><div class="title" style="white-space:normal">${esc(nice(l.p.name))}${l.custom ? ` <span class="tag">One-off</span>` : ""}</div><div class="small muted">${RM(l.p.retail_price)} each</div></div>
+        <span class="stepper"><button type="button" data-d="-1" data-k="${l.custom ? "c:" + l.custom : l.p.sku}">−</button><b>${l.qty}</b><button type="button" data-d="1" data-k="${l.custom ? "c:" + l.custom : l.p.sku}">+</button></span></div>`).join("")}</div>
+      <label class="field" style="margin-top:14px"><span>Final price (RM), only if the customer pays a different amount</span><input id="final" type="number" inputmode="decimal" min="0" step="0.01" placeholder="${gross.toFixed(2)}" value="${state.finalPrice ?? ""}"></label>
+      <label class="field"><span>Paid by</span></label>
+      <div class="chips" style="margin-top:-6px">${PAYMENTS.map(p => `<button class="chip" data-pay="${p}" aria-pressed="${state.payment === p}">${p}</button>`).join("")}</div>
+      <div class="row" style="margin:12px 0"><span>Total${state.finalPrice != null && total !== gross ? ` <span class="small muted" style="text-decoration:line-through">${RM(gross)}</span>` : ""}</span><strong class="num" style="font-size:22px">${RM(total)}</strong></div>
+      <button class="btn primary block" id="complete">Complete sale · ${esc(state.payment)}</button>
+      <div class="btns" style="margin-top:10px"><button class="btn" id="clear">Clear cart</button><button class="btn" id="close">Keep selling</button></div>`, root => {
+      root.querySelectorAll("[data-d]").forEach(b => b.onclick = () => {
+        const k = b.dataset.k, d = Number(b.dataset.d);
+        if (k.startsWith("c:")) { const c = state.custom.find(x => x.id === k.slice(2)); if (c) c.qty = Math.max(0, c.qty + d); state.custom = state.custom.filter(x => x.qty > 0); }
+        else { state.cart[k] = Math.max(0, (state.cart[k] || 0) + d); if (!state.cart[k]) delete state.cart[k]; }
+        if (!cartLines().length) { clearCart(); closeSheet(); render(); } else draw();
+      });
       root.querySelectorAll("[data-pay]").forEach(b => b.onclick = () => { state.payment = b.dataset.pay; draw(); });
-      root.querySelector("#disc").onchange = e => { state.discount = Number(e.target.value) || 0; draw(); };
-      root.querySelector("#clear").onclick = () => { state.cart = {}; state.discount = 0; closeSheet(); render(); };
+      root.querySelector("#final").onchange = e => { const v = e.target.value.trim(); state.finalPrice = v === "" ? null : Math.max(0, Number(v) || 0); draw(); };
+      root.querySelector("#clear").onclick = () => { clearCart(); closeSheet(); render(); };
       root.querySelector("#close").onclick = () => { closeSheet(); render(); };
-      root.querySelector("#complete").onclick = () => completeSale(t);
+      root.querySelector("#complete").onclick = () => completeSale(t, state.payment);
     });
   };
   draw();
 }
 
-function completeSale(t) {
+function completeSale(t, method) {
   const lines = cartLines(); if (!lines.length) return;
-  const gross = cartGross(), disc = Math.min(Number(state.discount) || 0, gross);
+  const gross = cartGross(), total = cartTotal(), diff = round2(gross - total);
   const now = new Date(), cart = uuid(), sm = ym(now) + "-01";
-  let left = round2(gross - disc);
+  let left = total;
   const rows = lines.map((l, i) => {
     const lineGross = l.qty * Number(l.p.retail_price);
-    const amt = i === lines.length - 1 ? left : round2(lineGross - (gross ? disc * lineGross / gross : 0));
+    const amt = i === lines.length - 1 ? round2(left) : round2(gross ? total * lineGross / gross : 0);
     left = round2(left - amt);
     return { client_id: uuid(), cart_id: cart, sold_at: now.toISOString(), sale_month: sm, channel: t.channel, location_id: t.locationId,
-      sku: l.p.sku, qty: l.qty, unit_price: Number(l.p.retail_price), amount: amt, payment_method: state.payment, notes: disc ? `Discount RM${disc}` : null };
+      sku: l.p.sku, qty: l.qty, unit_price: Number(l.p.retail_price), amount: amt, payment_method: method,
+      description: l.custom ? l.p.name : null,
+      notes: diff > 0.004 ? `Final price ${RM(total)} (RM${diff.toFixed(2)} off)` : diff < -0.004 ? `Final price ${RM(total)}` : null };
   });
+  const before = { cart: { ...state.cart }, custom: (state.custom || []).map(c => ({ ...c })), finalPrice: state.finalPrice };
   setOutbox(outbox().concat(rows));
-  state.cart = {}; state.discount = 0; closeSheet(); render();
-  toast(`Sale saved · ${RM(gross - disc)} ${state.payment}`);
+  clearCart(); closeSheet(); render();
+  toast(`Sale saved · ${RM(total)} ${method}`, { label: "Undo", run: () => undoSale(cart, before) });
   sync();
+}
+/* undo: take the sale back out (still on the phone, or already sent), and put the pieces back in the cart */
+async function undoSale(cartId, before) {
+  setOutbox(outbox().filter(r => r.cart_id !== cartId));
+  state.cart = before.cart; state.custom = before.custom; state.finalPrice = before.finalPrice;
+  render();
+  try { await q(sb.from("sales").update({ deleted_at: new Date().toISOString() }).eq("cart_id", cartId)); } catch (e) { console.warn("undo later", e); }
+  await loadStock(); state.todayJson = null; render(); toast("Sale undone. The pieces are back in the cart.");
+}
+
+/* a one-off piece that isn't in the app */
+function otherPieceSheet() {
+  openSheet(`
+    <h2>Other piece</h2>
+    <p class="small muted">For a one-off or custom piece that isn't in the app. It's added to this sale only and doesn't change stock.</p>
+    <form id="f">
+      <label class="field"><span>What is it</span><input name="name" required placeholder="e.g. Custom name ring"></label>
+      <label class="field"><span>Price (RM)</span><input name="price" type="number" step="0.01" min="0" inputmode="decimal" required></label>
+      <label class="field"><span>How many</span><input name="qty" type="number" step="1" min="1" inputmode="numeric" value="1"></label>
+      <button class="btn primary block">Add to sale</button>
+    </form>`, root => root.querySelector("#f").onsubmit = e => {
+      e.preventDefault(); const f = Object.fromEntries(new FormData(e.target));
+      const price = round2(Number(f.price)); if (!(price >= 0) || !f.name.trim()) return toast("Enter a name and price");
+      state.custom = (state.custom || []).concat({ id: uuid(), name: f.name.trim(), price, qty: Math.max(1, parseInt(f.qty, 10) || 1) });
+      closeSheet(); toast("Added to the sale"); render();
+    });
 }
 
 async function todaySheet(t) {
@@ -630,7 +728,7 @@ async function todaySheet(t) {
     <h2 style="margin-top:0">Today at ${esc(t.name)}</h2>
     <div class="figures"><div class="figure lead"><div class="label">${pcs} pieces sold</div><div class="value">${RM(total)}</div></div>
       ${Object.entries(byPay).map(([k, v]) => `<div class="figure"><div class="label">${esc(k)}</div><div class="value">${RM(v)}</div></div>`).join("")}</div>
-    <div class="list tight">${Object.entries(carts).map(([k, c]) => `<div class="row"><div class="grow"><div class="title">${c.rows.map(r => `${r.qty}× ${esc(prod(r.sku)?.name || r.sku)}`).join(", ")}</div>
+    <div class="list tight">${Object.entries(carts).map(([k, c]) => `<div class="row"><div class="grow"><div class="title">${c.rows.map(r => `${r.qty || 1}× ${esc(nice(prod(r.sku)?.name || r.description || r.sku || "Piece"))}`).join(", ")}</div>
       <div class="small muted">${new Date(c.at).toLocaleTimeString("en-MY", { hour: "numeric", minute: "2-digit" })} · ${esc(c.pay || "")}</div></div>
       <span class="num">${RM(c.rows.reduce((x, r) => x + Number(r.amount), 0))}</span><button class="link" data-cart="${esc(k)}" style="background:none;border:0;color:var(--rust)">Remove</button></div>`).join("") || `<div class="empty">No sales yet today.</div>`}</div>
     <button class="btn block" id="close">Close</button>`, root => {
@@ -1263,6 +1361,8 @@ function productForm(p) {
     <h2>${p ? "Edit item" : "New item"}</h2>
     <form id="f">
       ${field("name", "Item name", "text", "Twisting Liana Vines Bracelet (Small)")}
+      ${field("short_name", "Short name on Sell (optional)", "text", "e.g. TLV Bracelet")}
+      <p class="small muted" style="margin:-6px 2px 12px">Shown on the Sell tiles so long names fit. For an item with sizes, one size is enough.</p>
       <div class="two">${withList("family", "Family", "TLV Bracelet")}${withList("collection", "Collection", "TLV")}</div>
       <div class="two">${withList("category", "Category", "Bracelet")}${withList("size", "Size", "Small")}</div>
       <div class="two">${field("retail_price", "Original price (RM)", "number")}

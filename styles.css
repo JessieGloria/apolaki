@@ -401,3 +401,45 @@ label.field { min-width: 0; }
 .cat-h .cat-ico { width: 30px; height: 30px; border-radius: 10px; }
 .cat-h .cat-ico .jw { width: 17px; height: 17px; }
 .cat-h b { margin-left: auto; font-size: 12px; color: var(--muted); font-weight: 600; }
+
+/* full item names on Sell tiles: wrap instead of cutting off */
+.tile .name, .grid.sm .tile .name { display: block; -webkit-line-clamp: unset; overflow: visible; min-height: 0; overflow-wrap: anywhere; hyphens: auto; }
+.grid.sm .tile { display: flex; flex-direction: column; }
+.grid.sm .tile .meta { margin-top: auto; padding-top: 2px; }
+
+/* ---- category colours instead of icons ---- */
+.cat-bar { width: 6px; align-self: stretch; min-height: 38px; border-radius: 6px; flex: none; }
+details.group > summary { padding-left: 14px; }
+.sell-tabs { gap: 8px; padding-bottom: 12px; }
+.sell-tabs .ctab { padding: 7px 14px; border-radius: 20px; font-size: 12.5px; color: #fff; opacity: .62; transition: opacity .2s, transform .1s; }
+.sell-tabs .ctab[aria-pressed="true"] { opacity: 1; box-shadow: 0 6px 14px rgba(60,110,140,.22); }
+.sell-tabs .ctab[aria-pressed="true"]::after { display: none; }
+.sell-tabs .ctab.c-all { background: var(--text); }
+.cat-pill { color: #fff; padding: 4px 12px; border-radius: 20px; font-size: 12.5px; }
+.cat-h { margin-top: 18px; }
+/* plain colour behind items without a photo */
+.tile .ph { font-size: 0; }
+.photo-box .ph { font-size: 0; }
+/* sale bar: total + Cash / QR */
+.cartbar { flex-wrap: nowrap; padding: 12px 16px 12px 20px; }
+.cb-info { min-width: 0; flex: 1; }
+.cb-total { display: flex; align-items: baseline; gap: 8px; border: 0; background: none; padding: 0; font-size: 21px; font-weight: 700; color: var(--text); }
+.cb-total s, .cb-total em { font-size: 11.5px; font-weight: 500; color: var(--muted); font-style: normal; }
+.cb-total em { color: var(--accent-ink); text-decoration: underline; }
+.cb-price { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.cb-price input { width: 120px; min-height: 38px; padding: 6px 10px; }
+.cb-pay { display: flex; gap: 8px; flex: none; }
+.cartbar .btn.pay { padding: 13px 16px; min-width: 64px; }
+.cartbar .btn.pay[data-paynow="QR"] { background: var(--text); box-shadow: 0 10px 22px rgba(31,45,58,.25); }
+/* toast with Undo */
+.toast.has-action { pointer-events: auto; display: flex; align-items: center; gap: 12px; }
+.toast button { border: 0; background: rgba(255,255,255,.18); color: #fff; font-weight: 700; font-size: 12.5px; padding: 6px 12px; border-radius: 10px; }
+/* today strip and other piece */
+.today-strip { width: 100%; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border: 0; text-align: left; background: var(--panel); border-radius: 16px; padding: 11px 14px; margin: -2px 0 12px; box-shadow: var(--shadow); font-size: 12.5px; color: var(--text); }
+.today-strip strong { font-size: 14px; }
+.today-strip .tp { font-size: 11px; color: var(--muted); background: var(--input-bg); padding: 2px 8px; border-radius: 10px; }
+.today-strip .chev { margin-left: auto; }
+.other-btn { width: 100%; border: 1.5px dashed var(--ink-3); background: transparent; color: var(--accent-ink); font-weight: 600; font-size: 13px; padding: 11px; border-radius: 16px; margin: 0 0 4px; }
+.sell-tabs .ctab.g-sky { background: var(--g-sky); } .sell-tabs .ctab.g-sunset { background: var(--g-sunset); }
+.sell-tabs .ctab.g-coral { background: var(--g-coral); } .sell-tabs .ctab.g-sea { background: var(--g-sea); }
+.sell-tabs .ctab.g-mint { background: var(--g-mint); } .sell-tabs .ctab.g-dusk { background: var(--g-dusk); }
