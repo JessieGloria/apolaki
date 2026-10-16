@@ -14,6 +14,21 @@ const state = {
 const CATEGORIES = ["Raw Material","Packaging","Tools","Equipment","Postage","Office Supplies","Market Fee","Workshop Rent","Salary","Transport","Other"];
 const GROUPS = ["Cost of Goods Sold","Operating Expenses","Employee","Equipment"];
 const PAYMENTS = ["Cash","QR","Card","Transfer"];
+const ICONS = {
+  in: '<path d="M12 3v18M17 7.5c0-1.9-2.2-3-5-3s-5 1.1-5 3 2.2 2.6 5 3.2 5 1.4 5 3.3-2.2 3.3-5 3.3-5-1.2-5-3.1"/>',
+  out: '<path d="M4 7h16v11H4zM4 11h16M8 15h3"/>',
+  left: '<path d="M4 17l5-5 4 4 7-8M15 8h5v5"/>',
+  shop: '<path d="M4 20V9l8-5 8 5v11M9 20v-6h6v6"/>',
+  box: '<path d="M3 7l9-4 9 4-9 4zM3 7v10l9 4 9-4V7M12 11v10"/>',
+  tent: '<path d="M3 20 12 4l9 16zM12 4v16M8 20l4-6 4 6"/>',
+  warn: '<path d="M12 4 2.5 20h19zM12 10v4M12 17v.5"/>',
+  clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  tool: '<path d="M14 6a4 4 0 0 0 5 5l-8 8a2 2 0 0 1-3-3z"/>'
+};
+const ico = (name, color, lg) => `<span class="ico${lg ? " lg" : ""}" style="background:${color}"><svg viewBox="0 0 24 24">${ICONS[name]}</svg></span>`;
+const CHEV = '<svg class="chev" viewBox="0 0 8 13"><path d="M1.5 1.5 6.5 6.5 1.5 11.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+const SKEL = '<div class="skeleton"></div><div class="skeleton" style="height:64px"></div><div class="skeleton" style="height:64px"></div>';
+const COLORS = ["var(--blue)","var(--orange)","var(--purple)","var(--pink)","var(--green)","var(--teal)","var(--yellow)","var(--indigo)","var(--red)","var(--green)","var(--orange)","var(--blue)"];
 
 /* ---------- helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -32,12 +47,20 @@ function localGet(k, d) { try { const v = localStorage.getItem("apolaki:" + k); 
 function localSet(k, v) { try { localStorage.setItem("apolaki:" + k, JSON.stringify(v)); } catch {} }
 
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 2600); }
+let sheetTimer;
 function openSheet(html, bind) {
-  $("#sheetBody").innerHTML = html; $("#sheet").hidden = false;
+  clearTimeout(sheetTimer);
+  const sh = $("#sheet");
+  $("#sheetBody").innerHTML = html;
+  if (sh.hidden) { sh.hidden = false; sh.getBoundingClientRect(); }
+  sh.classList.add("open"); $("#sheetBody").parentElement.scrollTop = 0;
   if (bind) bind($("#sheetBody"));
   const f = $("#sheetBody").querySelector("input,select,textarea,button"); if (f) f.focus();
 }
-function closeSheet() { $("#sheet").hidden = true; $("#sheetBody").innerHTML = ""; }
+function closeSheet() {
+  const sh = $("#sheet"); sh.classList.remove("open");
+  clearTimeout(sheetTimer); sheetTimer = setTimeout(() => { sh.hidden = true; $("#sheetBody").innerHTML = ""; }, 320);
+}
 $("#sheet").addEventListener("click", e => { if (e.target.id === "sheet") closeSheet(); });
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#sheet").hidden) closeSheet(); });
 
@@ -133,7 +156,7 @@ function renderLogin(msg) {
 }
 async function start(session) {
   state.user = session ? session.user : null;
-  if (!state.user) { updateBadge(); return renderLogin(); }
+  if (!state.user) { updateBadge(); $("#avatar").hidden = true; return renderLogin(); }
   if (navigator.onLine) {
     const { data, error } = await sb.from("allowed_users").select("email");
     if (!error && (!data || !data.length)) {
@@ -144,6 +167,8 @@ async function start(session) {
     }
   }
   $("#tabs").hidden = false;
+  const av = $("#avatar"); av.hidden = false; av.textContent = (state.user.email || "?").slice(0, 2).toUpperCase();
+  av.onclick = () => openSheet(`<h2 style="margin-top:0">Account</h2><p class="muted">${esc(state.user.email)}</p><button class="btn danger block" id="so">Sign out</button>`, r => r.querySelector("#so").onclick = () => { closeSheet(); sb.auth.signOut(); });
   await loadAll(); updateBadge(); sync(); render();
 }
 sb.auth.onAuthStateChange((evt, session) => {
@@ -153,7 +178,11 @@ sb.auth.onAuthStateChange((evt, session) => {
 sb.auth.getSession().then(({ data }) => start(data.session));
 
 /* ---------- navigation ---------- */
-document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => { state.tab = b.dataset.tab; render(); window.scrollTo(0, 0); });
+function go(tab) {
+  state.tab = tab; render(); window.scrollTo(0, 0);
+  const v = $("#view"); v.classList.remove("enter"); void v.offsetWidth; v.classList.add("enter");
+}
+document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => go(b.dataset.tab));
 function render() {
   document.querySelectorAll("#tabs button").forEach(b => b.setAttribute("aria-current", b.dataset.tab === state.tab ? "page" : "false"));
   ({ home: renderHome, market: renderSell, retailers: renderRetailers, stock: renderStock, accounts: renderAccounts })[state.tab]();
@@ -162,40 +191,87 @@ function render() {
 /* =========================================================
    HOME
    ========================================================= */
+async function fetchHomeData() {
+  const now = new Date(), ys = new Date(now.getFullYear(), 0, 1), ye = new Date(now.getFullYear() + 1, 0, 1);
+  const [sales, pays, exps, unpaid] = await Promise.all([
+    q(sb.from("sales").select("sold_at,amount,channel").neq("channel", "retailer").gte("sold_at", ys.toISOString()).lt("sold_at", ye.toISOString())),
+    q(sb.from("payouts").select("paid_on,paid_amount,net_amount").eq("paid", true).gte("paid_on", ymd(ys)).lt("paid_on", ymd(ye))),
+    q(sb.from("expenses").select("spent_on,amount").gte("spent_on", ymd(ys)).lt("spent_on", ymd(ye))),
+    q(sb.from("payouts").select("*").eq("paid", false).order("period_month"))
+  ]);
+  return { year: now.getFullYear(), sales, pays, exps, unpaid };
+}
+
 async function renderHome() {
-  const now = new Date(), ms = new Date(now.getFullYear(), now.getMonth(), 1), me = nextMonth(ms);
   const view = $("#view");
-  view.innerHTML = `<h1>${now.toLocaleDateString("en-MY", { month: "long", year: "numeric" })}</h1><p class="muted">Loading…</p>`;
-  let sales = [], payouts = [], expenses = [], unpaid = [];
+  const cached = localGet("homeData", null);
+  if (cached) drawHome(cached); else view.innerHTML = `<h1>Overview</h1>${SKEL}`;
   try {
-    [sales, payouts, expenses, unpaid] = await Promise.all([
-      q(sb.from("sales").select("amount,channel").neq("channel", "retailer").gte("sold_at", ms.toISOString()).lt("sold_at", me.toISOString())),
-      q(sb.from("payouts").select("paid_amount,net_amount").eq("paid", true).gte("paid_on", ymd(ms)).lt("paid_on", ymd(me))),
-      q(sb.from("expenses").select("amount").gte("spent_on", ymd(ms)).lt("spent_on", ymd(me))),
-      q(sb.from("payouts").select("*").eq("paid", false).order("period_month"))
-    ]);
-  } catch { view.innerHTML = `<h1>Home</h1><div class="card">You're offline. The Sell tab still works and will sync later.</div>`; return; }
+    const fresh = await fetchHomeData();
+    if (JSON.stringify(fresh) !== JSON.stringify(cached)) { localSet("homeData", fresh); if (state.tab === "home") drawHome(fresh, true); }
+  } catch { if (!cached) view.innerHTML = `<h1>Overview</h1><div class="card">You're offline. The Sell tab still works and syncs later.</div>`; }
+}
+
+function drawHome(d, quiet) {
+  const view = $("#view"), now = new Date(), curM = ym(now), period = state.homePeriod || "month";
+  const monthOf = s => ym(new Date(s.length === 10 ? s + "T00:00" : s));
+  const inPeriod = s => period === "year" || monthOf(s) === curM;
+  const months = Array.from({ length: 12 }, (_, i) => ym(new Date(d.year, i, 1)));
+  const inc = Object.fromEntries(months.map(m => [m, 0]));
+  const src = { Shops: 0, Markets: 0, Online: 0 };
+  d.sales.forEach(s => { inc[monthOf(s.sold_at)] += Number(s.amount); if (inPeriod(s.sold_at)) src[s.channel === "online" ? "Online" : "Markets"] += Number(s.amount); });
+  d.pays.forEach(p => { const a = Number(p.paid_amount ?? p.net_amount); inc[monthOf(p.paid_on)] += a; if (inPeriod(p.paid_on)) src.Shops += a; });
   const pending = outbox().reduce((t, r) => t + Number(r.amount), 0);
-  const income = sales.reduce((t, r) => t + Number(r.amount), 0) + payouts.reduce((t, r) => t + Number(r.paid_amount ?? r.net_amount), 0) + pending;
-  const spent = expenses.reduce((t, r) => t + Number(r.amount), 0);
-  const due = unpaid.reduce((t, r) => t + Number(r.net_amount), 0);
+  src[outbox().some(r => r.channel === "online") ? "Online" : "Markets"] += pending; inc[curM] += pending;
+  const moneyIn = Object.values(src).reduce((a, b) => a + b, 0);
+  const spent = d.exps.filter(e => inPeriod(e.spent_on)).reduce((t, e) => t + Number(e.amount), 0);
+  const due = d.unpaid.reduce((t, r) => t + Number(r.net_amount), 0);
+  const shown = months.filter(m => m <= curM).slice(-8);
+  const max = Math.max(1, ...shown.map(m => inc[m]));
+  const pieces = stockTotalAt("all");
+
+  const srcColors = { Shops: "var(--blue)", Markets: "var(--orange)", Online: "var(--purple)" };
+  const C = 2 * Math.PI * 42; let off = 0;
+  const arcs = Object.entries(src).filter(([, v]) => v > 0).map(([k, v]) => {
+    const len = moneyIn ? C * v / moneyIn : 0, gap = Object.values(src).filter(x => x > 0).length > 1 ? 2.5 : 0;
+    const a = `<circle cx="50" cy="50" r="42" fill="none" stroke="${srcColors[k]}" stroke-width="13" stroke-linecap="round" stroke-dasharray="${Math.max(0, len - gap)} ${C}" stroke-dashoffset="${-off}"/>`;
+    off += len; return a;
+  }).join("");
+
+  const places = [workshop(), ...retailers(), ...state.locations.filter(l => l.type === "market" && l.active)].filter(Boolean);
+  const placeColor = l => l.type === "workshop" ? "var(--teal)" : l.type === "retailer" ? "var(--blue)" : "var(--orange)";
+  const placeIcon = l => l.type === "workshop" ? "tool" : l.type === "retailer" ? "shop" : "tent";
   const low = activeProducts().map(p => ({ p, n: stockAt("all", p.sku) })).filter(x => x.n <= 1).sort((a, b) => a.n - b.n);
+  const label = period === "year" ? String(d.year) : now.toLocaleDateString("en-MY", { month: "long" });
+
   view.innerHTML = `
-    <h1>${now.toLocaleDateString("en-MY", { month: "long", year: "numeric" })}</h1>
-    <div class="figures">
-      <div class="figure lead"><div class="label">Money in this month</div><div class="value">${RM(income)}</div></div>
-      <div class="figure"><div class="label">Spent this month</div><div class="value">${RM(spent)}</div></div>
-      <div class="figure"><div class="label">Left this month</div><div class="value">${RM(income - spent)}</div></div>
-      <div class="figure"><div class="label">Pieces in stock</div><div class="value">${stockTotalAt("all")}</div></div>
-      <div class="figure"><div class="label">Shop payouts due</div><div class="value">${RM(due)}</div></div>
+    <h1>Overview</h1>
+    <div class="seg"><button data-p="month" aria-pressed="${period === "month"}">This month</button><button data-p="year" aria-pressed="${period === "year"}">This year</button></div>
+    <div class="card">
+      <div class="eyebrow">MONEY IN · ${esc(label.toUpperCase())}</div>
+      <div class="num" style="font-size:32px;font-weight:700;margin-top:2px">${RM(moneyIn)}</div>
+      <div class="bars">${shown.map((m, i) => `<div class="bar ${m === curM ? "now" : ""}"><i style="height:${Math.max(4, inc[m] / max * 100)}%;background:${COLORS[(i + months.indexOf(shown[0])) % 12]};animation-delay:${quiet ? 0 : i * 40}ms"></i><span>${monthStart(m).toLocaleDateString("en-MY", { month: "short" })}</span></div>`).join("")}</div>
     </div>
-    ${unpaid.length ? `<h2>Waiting for payment</h2><div class="list">${unpaid.map(u => `
-      <div class="row"><div class="grow"><div class="title">${esc(loc(u.location_id)?.name)} · ${monthLabel(u.period_month.slice(0, 7))}</div><div class="small muted">Sales ${RM(u.sales_amount)}</div></div><span class="num">${RM(u.net_amount)}</span></div>`).join("")}</div>` : ""}
-    <h2>Running low</h2>
-    ${low.length ? `<div class="list">${low.slice(0, 12).map(x => `
-      <div class="row"><div class="grow"><div class="title">${esc(x.p.name)}</div><div class="small muted">${x.p.sku}</div></div><span class="tag ${x.n <= 0 ? "rust" : "brass"}">${x.n <= 0 ? "Sold out" : "1 left"}</span></div>`).join("")}</div>` : `<div class="card muted">Every active piece has at least 2 in stock.</div>`}
-    <div class="btns"><button class="btn" id="signout">Sign out</button></div>`;
-  $("#signout").onclick = () => sb.auth.signOut();
+    <div class="list">
+      <div class="row" data-go="accounts">${ico("in", "var(--green)")}<div class="grow"><div class="title">Money in</div><div class="sub">${label}</div></div><span class="value">${RM(moneyIn)}</span>${CHEV}</div>
+      <div class="row" data-go="accounts">${ico("out", "var(--red)")}<div class="grow"><div class="title">Spent</div><div class="sub">${label}</div></div><span class="value">${RM(spent)}</span>${CHEV}</div>
+      <div class="row" data-go="accounts">${ico("left", "var(--blue)")}<div class="grow"><div class="title">Left</div><div class="sub">${moneyIn - spent >= 0 ? "Money in minus spent" : "Spent more than came in"}</div></div><span class="value" style="${moneyIn - spent < 0 ? "color:var(--red)" : ""}">${RM(moneyIn - spent)}</span>${CHEV}</div>
+      <div class="row" data-go="retailers">${ico("clock", "var(--orange)")}<div class="grow"><div class="title">Shop payouts due</div><div class="sub">${d.unpaid.length ? d.unpaid.map(u => monthStart(u.period_month.slice(0, 7)).toLocaleDateString("en-MY", { month: "short" })).join(", ") : "All paid"}</div></div><span class="value">${RM(due)}</span>${CHEV}</div>
+      <div class="row" data-go="stock">${ico("box", "var(--purple)")}<div class="grow"><div class="title">Pieces in stock</div><div class="sub">${low.length ? `${low.length} running low` : "All stocked"}</div></div><span class="value">${pieces}</span>${CHEV}</div>
+    </div>
+    ${moneyIn ? `<h2>Where it came from</h2>
+    <div class="card">
+      <div class="donut-wrap"><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="42" fill="none" stroke="var(--card-2)" stroke-width="13"/>${arcs}</svg>
+        <div class="donut-mid"><div class="eyebrow">${esc(label.toUpperCase())}</div><div class="value num">${RM(moneyIn)}</div></div></div>
+      <div class="legend">${Object.entries(src).map(([k, v]) => `<div><b style="background:${srcColors[k]}"></b>${k}<span class="num">${RM(v)}</span></div>`).join("")}</div>
+    </div>` : ""}
+    <h2>Stock by place</h2>
+    <div class="tiles">${places.map(l => { const n = stockTotalAt(l.id); return `<button class="ttile" data-place="${l.id}">${ico(placeIcon(l), placeColor(l), true)}<div class="name">${esc(l.name)}</div><div class="sub">${n} pieces</div><div class="meter"><i style="width:${pieces ? n / pieces * 100 : 0}%;background:${placeColor(l)}"></i></div><div class="sub small">${pieces ? Math.round(n / pieces * 100) : 0}% of stock</div></button>`; }).join("")}</div>
+    ${low.length ? `<h2>Running low</h2><div class="list tight">${low.slice(0, 10).map(x => `<div class="row" data-sku="${x.p.sku}">${ico("warn", x.n <= 0 ? "var(--red)" : "var(--orange)")}<div class="grow"><div class="title">${esc(x.p.name)}</div><div class="sub">${x.p.sku}</div></div><span class="tag ${x.n <= 0 ? "rust" : "brass"}">${x.n <= 0 ? "Sold out" : "1 left"}</span></div>`).join("")}</div>` : ""}`;
+  view.querySelectorAll("[data-p]").forEach(b => b.onclick = () => { state.homePeriod = b.dataset.p; drawHome(d, true); });
+  view.querySelectorAll("[data-go]").forEach(r => r.onclick = () => go(r.dataset.go));
+  view.querySelectorAll("[data-place]").forEach(t => t.onclick = () => { state.stockLoc = Number(t.dataset.place); go("stock"); });
+  view.querySelectorAll(".row[data-sku]").forEach(r => r.onclick = () => adjustSheet(prod(r.dataset.sku), workshop().id));
 }
 
 /* =========================================================
@@ -228,7 +304,7 @@ async function renderSell() {
   const items = activeProducts().filter(p => !s || p.name.toLowerCase().includes(s) || p.sku.toLowerCase().includes(s))
     .map(p => ({ p, left: stockAt(t.stockLoc, p.sku) })).sort((a, b) => (b.left > 0) - (a.left > 0) || a.p.sku.localeCompare(b.p.sku));
   const n = cartLines().reduce((x, l) => x + l.qty, 0);
-  view.innerHTML = `
+  view.innerHTML = `<h1>Sell</h1>
     <label class="field"><span>Selling at</span><select id="sellAt">${choices}</select></label>
     <div class="btns">
       ${t.market ? `<button class="btn" id="bring">Bring stock</button>` : ""}
@@ -266,11 +342,11 @@ function reviewSheet(t) {
     const lines = cartLines(), gross = cartGross(), disc = Math.min(Number(state.discount) || 0, gross);
     openSheet(`
       <h2 style="margin-top:0">Sale at ${esc(t.name)}</h2>
-      <div class="list">${lines.map(l => `<div class="row"><div class="grow"><div class="title">${esc(l.p.name)}</div><div class="small muted">${RM(l.p.retail_price)} each</div></div>
+      <div class="list tight">${lines.map(l => `<div class="row"><div class="grow"><div class="title">${esc(l.p.name)}</div><div class="small muted">${RM(l.p.retail_price)} each</div></div>
         <button class="chip" data-d="-1" data-sku="${l.p.sku}" aria-label="One fewer">−</button><span class="num">${l.qty}</span><button class="chip" data-d="1" data-sku="${l.p.sku}" aria-label="One more">+</button></div>`).join("")}</div>
       <label class="field"><span>Discount on this sale (RM)</span><input id="disc" type="number" inputmode="decimal" min="0" step="0.01" value="${state.discount || ""}"></label>
       <div class="chips">${PAYMENTS.map(p => `<button class="chip" data-pay="${p}" aria-pressed="${state.payment === p}">${p}</button>`).join("")}</div>
-      <div class="row" style="padding:12px 0"><span>Total</span><strong class="num" style="font-size:22px">${RM(gross - disc)}</strong></div>
+      <div class="row" style="margin:12px 0"><span>Total</span><strong class="num" style="font-size:22px">${RM(gross - disc)}</strong></div>
       <button class="btn primary block" id="complete">Complete sale</button>
       <div class="btns"><button class="btn" id="clear">Clear cart</button><button class="btn" id="close">Keep selling</button></div>`, root => {
       root.querySelectorAll("[data-d]").forEach(b => b.onclick = () => { state.cart[b.dataset.sku] = Math.max(0, (state.cart[b.dataset.sku] || 0) + Number(b.dataset.d)); if (!cartLines().length) { closeSheet(); render(); } else draw(); });
@@ -319,7 +395,7 @@ async function todaySheet(t) {
     <h2 style="margin-top:0">Today at ${esc(t.name)}</h2>
     <div class="figures"><div class="figure lead"><div class="label">${pcs} pieces sold</div><div class="value">${RM(total)}</div></div>
       ${Object.entries(byPay).map(([k, v]) => `<div class="figure"><div class="label">${esc(k)}</div><div class="value">${RM(v)}</div></div>`).join("")}</div>
-    <div class="list">${Object.entries(carts).map(([k, c]) => `<div class="row"><div class="grow"><div class="title">${c.rows.map(r => `${r.qty}× ${esc(prod(r.sku)?.name || r.sku)}`).join(", ")}</div>
+    <div class="list tight">${Object.entries(carts).map(([k, c]) => `<div class="row"><div class="grow"><div class="title">${c.rows.map(r => `${r.qty}× ${esc(prod(r.sku)?.name || r.sku)}`).join(", ")}</div>
       <div class="small muted">${new Date(c.at).toLocaleTimeString("en-MY", { hour: "numeric", minute: "2-digit" })} · ${esc(c.pay || "")}</div></div>
       <span class="num">${RM(c.rows.reduce((x, r) => x + Number(r.amount), 0))}</span><button class="link" data-cart="${esc(k)}" style="background:none;border:0;color:var(--rust)">Remove</button></div>`).join("") || `<div class="empty">No sales yet today.</div>`}</div>
     <button class="btn block" id="close">Close</button>`, root => {
@@ -512,7 +588,7 @@ async function payoutsSheet(r) {
   try { rows = await q(sb.from("payouts").select("*").eq("location_id", r.id).order("period_month", { ascending: false })); } catch (e) { return fail(e); }
   openSheet(`
     <h2 style="margin-top:0">${esc(r.name)} payouts</h2>
-    <div class="list">${rows.map(p => `<div class="row"><div class="grow"><div class="title">${monthLabel(p.period_month.slice(0, 7))} sales</div>
+    <div class="list tight">${rows.map(p => `<div class="row"><div class="grow"><div class="title">${monthLabel(p.period_month.slice(0, 7))} sales</div>
       <div class="small muted">${p.sales_amount ? `Sales ${RM(p.sales_amount)} · ` : ""}${p.paid ? `Paid ${p.paid_on ? shortDate(p.paid_on) : ""}` : "Not paid yet"}</div></div>
       <span class="num">${RM(p.paid ? (p.paid_amount ?? p.net_amount) : p.net_amount)}</span>
       ${p.paid ? `<span class="tag">Paid</span>` : `<button class="btn" data-pay="${p.id}" style="min-height:36px">Mark paid</button>`}</div>`).join("") || `<div class="empty">No payouts yet.</div>`}</div>
@@ -545,7 +621,7 @@ function renderStock() {
     ${places.map(l => `<button class="chip" data-l="${l.id}" aria-pressed="${String(L) === String(l.id)}">${esc(l.name)} · ${stockTotalAt(l.id)}</button>`).join("")}</div>
     <div class="btns"><button class="btn" id="add">Add new pieces</button><button class="btn" id="move">Move stock</button><button class="btn" id="products">Products</button></div>
     <input class="search" id="search" type="search" placeholder="Search pieces" value="${esc(state.search)}">
-    <div class="list">${rows.map(({ p, n }) => {
+    <div class="list tight">${rows.map(({ p, n }) => {
       const where = L === "all" ? places.map(l => [l, stockAt(l.id, p.sku)]).filter(([, k]) => k).map(([l, k]) => `${esc(l.name)} ${k}`).join(" · ") : "";
       return `<div class="row" data-sku="${p.sku}"><div class="grow"><div class="title">${esc(p.name)}</div><div class="small muted">${p.sku}${p.status !== "Active" ? " · " + esc(p.status) : ""}${where ? " · " + where : ""}</div></div>
         <span class="num" style="font-size:18px;${n <= 0 ? "color:var(--rust)" : ""}">${n}</span></div>`;
@@ -573,7 +649,7 @@ function moveSheet({ from, to, title, restock }) {
       <label class="field"><span>To</span><select id="to">${locOptions(to)}</select></label></div>
     <div class="two"><label class="field"><span>Date</span><input id="d" type="date" value="${ymd(new Date())}"></label>
     <label class="field"><span>Reference</span><input id="ref" placeholder="OCT-01"></label></div>
-    <div class="list" id="pick">${list.map(p => `<div class="row"><div class="grow"><div class="title small">${esc(p.name)}</div><div class="small muted" data-have="${p.sku}"></div></div>
+    <div class="list tight" id="pick">${list.map(p => `<div class="row"><div class="grow"><div class="title small">${esc(p.name)}</div><div class="small muted" data-have="${p.sku}"></div></div>
       <input type="number" inputmode="numeric" min="0" step="1" data-sku="${p.sku}" style="width:80px" placeholder="0"></div>`).join("")}</div>
     <button class="btn primary block" id="go">Save</button>`, root => {
     const showHave = () => { const f = root.querySelector("#from").value; root.querySelectorAll("[data-have]").forEach(e => e.textContent = f ? `${stockAt(Number(f), e.dataset.have)} at source` : e.dataset.have); };
@@ -614,7 +690,7 @@ function productsSheet() {
   openSheet(`
     <h2 style="margin-top:0">Products</h2>
     <button class="btn primary block" id="new">Add a product</button>
-    <div class="list" style="margin-top:12px">${state.products.map(p => `<div class="row" data-sku="${p.sku}"><div class="grow"><div class="title">${esc(p.name)}</div><div class="small muted">${p.sku} · ${esc(p.category || "")} · ${esc(p.status)}</div></div><span class="num">${RM(p.retail_price)}</span></div>`).join("")}</div>`, root => {
+    <div class="list tight" style="margin-top:12px">${state.products.map(p => `<div class="row" data-sku="${p.sku}"><div class="grow"><div class="title">${esc(p.name)}</div><div class="small muted">${p.sku} · ${esc(p.category || "")} · ${esc(p.status)}</div></div><span class="num">${RM(p.retail_price)}</span></div>`).join("")}</div>`, root => {
     root.querySelector("#new").onclick = () => productForm(null);
     root.querySelectorAll("[data-sku]").forEach(r => r.onclick = () => productForm(prod(r.dataset.sku)));
   });
@@ -655,7 +731,7 @@ async function renderAccounts() {
   const view = $("#view");
   const mon = state.accMonth || ym(new Date()), ms = monthStart(mon), me = nextMonth(ms);
   const ys = new Date(ms.getFullYear(), 0, 1), ye = new Date(ms.getFullYear() + 1, 0, 1);
-  view.innerHTML = `<h1>Accounts</h1><p class="muted">Loading…</p>`;
+  if (!view.querySelector("#mon")) view.innerHTML = `<h1>Accounts</h1>${SKEL}`;
   let sales, pays, exps;
   try {
     [sales, pays, exps] = await Promise.all([
@@ -691,9 +767,9 @@ async function renderAccounts() {
       <div class="figure"><div class="label">Spent</div><div class="value">${RM(out[mon])}</div></div></div>
     <button class="btn primary block" id="addExp">Add an expense</button>
     <h2>Money in</h2>
-    <div class="list">${incomeRows.map(r => `<div class="row"><div class="grow"><div class="title">${esc(r.t)}</div><div class="small muted">${shortDate(r.d)} · ${esc(r.s)}</div></div><span class="num">${RM(r.a)}</span></div>`).join("") || `<div class="empty">Nothing received this month yet.</div>`}</div>
+    <div class="list tight">${incomeRows.map(r => `<div class="row"><div class="grow"><div class="title">${esc(r.t)}</div><div class="small muted">${shortDate(r.d)} · ${esc(r.s)}</div></div><span class="num">${RM(r.a)}</span></div>`).join("") || `<div class="empty">Nothing received this month yet.</div>`}</div>
     <h2>Spent</h2>
-    <div class="list">${mExps.map(e => `<div class="row" data-exp="${e.id}"><div class="grow"><div class="title">${esc(e.description || e.category)}</div><div class="small muted">${shortDate(e.spent_on)} · ${esc(e.category)}${e.paid_to ? " · " + esc(e.paid_to) : ""}</div></div><span class="num">${RM(e.amount)}</span></div>`).join("") || `<div class="empty">No expenses this month.</div>`}</div>
+    <div class="list tight">${mExps.map(e => `<div class="row" data-exp="${e.id}"><div class="grow"><div class="title">${esc(e.description || e.category)}</div><div class="small muted">${shortDate(e.spent_on)} · ${esc(e.category)}${e.paid_to ? " · " + esc(e.paid_to) : ""}</div></div><span class="num">${RM(e.amount)}</span></div>`).join("") || `<div class="empty">No expenses this month.</div>`}</div>
     <h2>${ms.getFullYear()} by month</h2>
     <div class="card scroll-x"><table class="simple"><tr><th>Month</th><th class="r">In</th><th class="r">Spent</th><th class="r">Left</th></tr>
       ${months.filter(m => inc[m] || out[m]).map(m => `<tr><td>${monthStart(m).toLocaleDateString("en-MY", { month: "short" })}</td><td class="r">${RM(inc[m])}</td><td class="r">${RM(out[m])}</td><td class="r" style="${inc[m] - out[m] < 0 ? "color:var(--rust)" : ""}">${RM(inc[m] - out[m])}</td></tr>`).join("")}
