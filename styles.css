@@ -48,7 +48,10 @@ button { cursor: pointer; }
 .avatar { width: 36px; height: 36px; border-radius: 50%; border: 0; background: var(--accent); color: #fff; font-size: 12.5px; font-weight: 600; display: flex; align-items: center; justify-content: center; box-shadow: 0 6px 16px rgba(20,20,20,.25); }
 
 main { max-width: 640px; margin: 0 auto; padding: 8px 20px 24px; outline: none; }
-main.enter { animation: pageFade .25s ease-out; }
+main.slide-r { animation: slideFromRight .3s var(--ease); }
+main.slide-l { animation: slideFromLeft .3s var(--ease); }
+@keyframes slideFromRight { from { opacity: 0; transform: translateX(28px); } to { opacity: 1; transform: none; } }
+@keyframes slideFromLeft { from { opacity: 0; transform: translateX(-28px); } to { opacity: 1; transform: none; } }
 @keyframes pageFade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes fadeSlideIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 
@@ -62,7 +65,9 @@ p { margin: 0 0 10px; }
 .eyebrow { font-size: 11px; font-weight: 600; color: var(--accent); letter-spacing: .04em; }
 .hello { color: var(--muted); font-size: 12.5px; margin: 0 2px 2px; }
 
-.card, .row, .figure, .ttile, .tile, .tl-card, .empty, .list.tight { animation: fadeSlideIn .5s var(--ease) both; }
+/* entrance animations only play when a screen is first opened, never on refreshes */
+main.anim :is(.card, .row, .figure, .ttile, .tile, .tl-card, .empty, .list.tight, .hero, .stat) { animation: fadeSlideIn .45s var(--ease) both; }
+main.anim .list.tight .row, main.anim .card .figure:not(.lead), main.anim .list.tight .empty { animation: none; }
 .card { background: var(--panel); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; box-shadow: var(--shadow); }
 
 /* list rows */
@@ -106,7 +111,7 @@ p { margin: 0 0 10px; }
 .figure.lead::after, .hero::after { content: ""; position: absolute; width: 90px; height: 90px; border-radius: 50%; background: rgba(255,255,255,.08); bottom: -40px; left: 30%; }
 
 /* hero card (like the OMFS patient header) */
-.hero { position: relative; overflow: hidden; border-radius: 24px; padding: 18px; color: #fff; background: linear-gradient(135deg, #3a3a3a, #1c1c1c); box-shadow: 0 10px 26px rgba(20,20,20,.28); margin-bottom: 14px; animation: fadeSlideIn .5s var(--ease) both; }
+.hero { position: relative; overflow: hidden; border-radius: 24px; padding: 18px; color: #fff; background: linear-gradient(135deg, #3a3a3a, #1c1c1c); box-shadow: 0 10px 26px rgba(20,20,20,.28); margin-bottom: 14px; }
 .hero > * { position: relative; z-index: 1; }
 .hero .eyebrow { color: rgba(255,255,255,.85); }
 .hero .big { font-size: 32px; font-weight: 700; line-height: 1.1; margin: 4px 0 12px; font-variant-numeric: tabular-nums; }
@@ -118,7 +123,7 @@ p { margin: 0 0 10px; }
 
 /* coloured stat tiles */
 .tile-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 6px; }
-.stat { position: relative; overflow: hidden; border-radius: 22px; padding: 16px; min-height: 104px; color: #fff; cursor: pointer; display: flex; flex-direction: column; justify-content: space-between; box-shadow: var(--shadow); border: 0; text-align: left; animation: fadeSlideIn .5s var(--ease) both; transition: transform .1s ease, opacity .1s ease; }
+.stat { position: relative; overflow: hidden; border-radius: 22px; padding: 16px; min-height: 104px; color: #fff; cursor: pointer; display: flex; flex-direction: column; justify-content: space-between; box-shadow: var(--shadow); border: 0; text-align: left; transition: transform .1s ease, opacity .1s ease; }
 .stat::before { content: ""; position: absolute; border-radius: 50%; width: 90px; height: 90px; background: rgba(255,255,255,.16); top: -30px; left: -30px; }
 .stat::after { content: ""; position: absolute; border-radius: 50%; width: 70px; height: 70px; background: rgba(255,255,255,.12); bottom: -26px; right: -18px; }
 .stat .n { font-size: 28px; font-weight: 700; line-height: 1; position: relative; font-variant-numeric: tabular-nums; }
@@ -151,7 +156,7 @@ p { margin: 0 0 10px; }
 /* charts */
 .bars { display: flex; align-items: flex-end; gap: 8px; height: 150px; margin-top: 14px; }
 .bar { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; gap: 6px; }
-.bar i { display: block; width: 100%; max-width: 24px; border-radius: 8px; min-height: 6px; transform-origin: bottom; animation: grow .7s var(--ease) both; background: var(--accent-bg) !important; }
+.bar i { display: block; width: 100%; max-width: 24px; border-radius: 8px; min-height: 6px; transform-origin: bottom; background: var(--accent-bg) !important; }
 .bar.now i { background: var(--accent) !important; }
 .bar span { font-size: 10.5px; color: var(--muted); }
 .bar.now span { color: var(--text); font-weight: 600; }
@@ -171,7 +176,7 @@ p { margin: 0 0 10px; }
 .ttile .name { margin-top: 10px; font-weight: 600; }
 .ttile .sub { color: var(--muted); font-size: 12px; }
 .meter { height: 6px; border-radius: 6px; background: var(--input-bg); margin: 10px 0 6px; overflow: hidden; }
-.meter i { display: block; height: 100%; border-radius: 6px; animation: slide .8s var(--ease) both; transform-origin: left; }
+.meter i { display: block; height: 100%; border-radius: 6px; transform-origin: left; }
 @keyframes slide { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 
 /* buttons & forms (OMFS style) */
@@ -294,3 +299,23 @@ table.simple tr[data-item] { cursor: pointer; }
 .row[data-item] { cursor: pointer; }
 .card.compact { padding: 14px 10px; }
 .card.compact table.simple td, .card.compact table.simple th { padding: 9px 4px; font-size: 12px; }
+.mini-in { min-height: 34px !important; padding: 6px 10px !important; width: 130px; }
+main.anim .bar i { animation: grow .7s var(--ease) both; }
+main.anim .meter i { animation: slide .8s var(--ease) both; }
+/* stop iPhone zooming into fields: inputs must be at least 16px */
+input, select, textarea, .mini-in { font-size: 16px !important; }
+textarea { font-size: 14px !important; }
+html, body { overscroll-behavior-y: none; }
+body.locked { overflow: hidden; }
+main { min-height: 60vh; }
+/* expandable groups (action table, stock categories) */
+details.group { background: var(--panel); border-radius: 16px; box-shadow: var(--shadow); margin-bottom: 10px; overflow: hidden; }
+details.group > summary { list-style: none; display: flex; align-items: center; gap: 10px; padding: 14px 16px; cursor: pointer; font-weight: 600; }
+details.group > summary::-webkit-details-marker { display: none; }
+details.group > summary .grow { flex: 1; min-width: 0; }
+details.group > summary .count { font-variant-numeric: tabular-nums; font-weight: 700; }
+details.group > summary .chev { transition: transform .25s var(--ease); }
+details.group[open] > summary .chev { transform: rotate(90deg); }
+details.group .inner { border-top: 1px solid var(--border); animation: pageFade .25s ease-out; }
+details.group .inner .row { box-shadow: none; border-radius: 0; border-top: 1px solid var(--border); animation: none; min-height: 52px; }
+details.group .inner .row:first-child { border-top: 0; }

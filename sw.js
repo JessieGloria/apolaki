@@ -1,4 +1,4 @@
-const CACHE = "apolaki-v6";
+const CACHE = "apolaki-v7";
 const SHELL = ["./", "index.html", "styles.css", "app.js", "config.js", "icon.svg", "manifest.webmanifest",
   "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL))); self.skipWaiting(); });
