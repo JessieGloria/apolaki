@@ -202,7 +202,7 @@ async function loadAll() {
     ]);
     state.products = p; state.locations = l; state.codes = c;
     localSet("products", p); localSet("locations", l); localSet("codes", c);
-    await loadStock(); loadPopular();
+    await loadStock();
   } catch (e) {
     state.products = localGet("products", []); state.locations = localGet("locations", []); state.stock = localGet("stock", []); state.codes = localGet("codes", []);
     toast("Offline. Showing the last saved copy.");
@@ -413,7 +413,11 @@ function drawHome(d, quiet) {
 
   /* needs attention: things that want an action */
   const attn = [];
-  d.unpaid.filter(u => u.period_month.slice(0, 7) < curM).forEach(u => attn.push({ c: "var(--coral)", t: `${loc(u.location_id)?.name || "Shop"} hasn't paid ${monthLabel(u.period_month.slice(0, 7))}`, s: RM(u.net_amount) + " due", go: "retailers" }));
+  d.unpaid.forEach(u => {
+    const due = u.due_on || dueDate(u.period_month.slice(0, 7)), today = ymd(now), soon = ymd(new Date(now.getTime() + 5 * 864e5));
+    if (due < today) attn.push({ c: "var(--coral)", t: `${loc(u.location_id)?.name || "Shop"} payment for ${monthLabel(u.period_month.slice(0, 7))} is overdue`, s: `${RM(u.net_amount)} was due ${shortDate(due)}`, go: "retailers" });
+    else if (due <= soon) attn.push({ c: "var(--peach)", t: `${loc(u.location_id)?.name || "Shop"} pays ${monthLabel(u.period_month.slice(0, 7))} soon`, s: `${RM(u.net_amount)} due ${shortDate(due)}`, go: "retailers" });
+  });
   const prevM = ym(new Date(now.getFullYear(), now.getMonth() - 1, 1));
   retailers().forEach(r => { const has = (d.lastReports || []).some(p => p.location_id === r.id); if (!has && now.getDate() >= 5) attn.push({ c: "var(--peach)", t: `No ${monthStart(prevM).toLocaleDateString("en-MY", { month: "long" })} sales report from ${r.name} yet`, s: "Paste it in Retailers", go: "retailers" }); });
   activeMarkets.filter(m => m.end_date && m.end_date < ymd(now)).forEach(m => attn.push({ c: "var(--peach)", t: `${m.name} ended ${shortDate(m.end_date)}`, s: "End the market to bring stock back", go: "market", sell: m.id }));
@@ -549,11 +553,9 @@ async function renderSell() {
   const s = state.search.toLowerCase();
   const groups = sizeGroups(activeProducts().filter(p => !s || p.name.toLowerCase().includes(s) || (p.family || "").toLowerCase().includes(s)), t.stockLoc);
   const cats = [...new Set(activeProducts().map(p => p.category || "Other"))].sort((a, b) => ((CAT_ORDER.indexOf(a) + 1) || 99) - ((CAT_ORDER.indexOf(b) + 1) || 99) || a.localeCompare(b));
-  const cat = state.sellCat && (state.sellCat === "all" || state.sellCat === "popular" || cats.includes(state.sellCat)) ? state.sellCat : "all";
-  /* best sellers first: in stock first, then most sold in the last 6 months */
-  const score = g => g.items.reduce((x, it) => x + (state.pop[it.p.sku] || 0), 0);
-  groups.sort((a, b) => (b.left > 0) - (a.left > 0) || score(b) - score(a) || a.name.localeCompare(b.name));
-  const popular = groups.filter(g => score(g) > 0).slice(0, 12);
+  const cat = state.sellCat && (state.sellCat === "all" || cats.includes(state.sellCat)) ? state.sellCat : "all";
+  /* in-stock pieces first, then A to Z */
+  groups.sort((a, b) => (b.left > 0) - (a.left > 0) || a.name.localeCompare(b.name));
   const today = todaySummary(t);
   const n = cartPieces();
   document.body.classList.toggle("has-cart", n > 0);
@@ -589,9 +591,9 @@ async function renderSell() {
       ${t.market ? `<button class="btn danger" id="endMarket">End market</button>` : ""}
     </div>
     <input class="search" id="search" type="search" placeholder="Search pieces" value="${esc(state.search)}">
-    <div class="ttabs sell-tabs">${[...(popular.length ? [["popular", "Popular"]] : []), ["all", "All"], ...cats.map(c => [c, CAT_PLURAL[c] || c])].map(([k, l]) => `<button type="button" class="ctab ${k === "all" || k === "popular" ? "c-all" : catG(k)}" data-cat="${esc(k)}" aria-pressed="${cat === k}">${esc(l)}</button>`).join("")}</div>
-    <button type="button" class="other-btn" id="otherPiece">+ Other piece (not in the app)</button>
-    <div id="grid">${cat === "popular" ? `<div class="grid sm">${popular.map(tileHtml).join("")}</div>` : (cat === "all" ? cats : [cat]).map(c => { const gs = groups.filter(g => (g.items[0].p.category || "Other") === c); return gs.length ? (cat === "all" ? `<div class="cat-h"><span class="cat-pill ${catG(c)}">${esc(CAT_PLURAL[c] || c)}</span><b>${gs.length}</b></div>` : "") + `<div class="grid sm">${gs.map(tileHtml).join("")}</div>` : ""; }).join("") || `<div class="empty">No pieces match.</div>`}</div>
+    <div class="ttabs sell-tabs">${[["all", "All"], ...cats.map(c => [c, CAT_PLURAL[c] || c])].map(([k, l]) => `<button type="button" class="ctab ${k === "all" || k === "popular" ? "c-all" : catG(k)}" data-cat="${esc(k)}" aria-pressed="${cat === k}">${esc(l)}</button>`).join("")}</div>
+    <div id="grid">${(cat === "all" ? cats : [cat]).map(c => { const gs = groups.filter(g => (g.items[0].p.category || "Other") === c); return gs.length ? (cat === "all" ? `<div class="cat-h"><span class="cat-pill ${catG(c)}">${esc(CAT_PLURAL[c] || c)}</span><b>${gs.length}</b></div>` : "") + `<div class="grid sm">${gs.map(tileHtml).join("")}</div>` : ""; }).join("") || `<div class="empty">No pieces match.</div>`}</div>
+    <button type="button" class="other-btn" id="otherPiece" style="margin-top:16px">+ Other piece</button>
     ${n ? `<div class="cartbar">
       <div class="cb-info">
         <div class="small">${n} piece${n > 1 ? "s" : ""} · <button type="button" class="link" id="review">Details</button> · <button type="button" class="link" id="clearCart">Clear</button></div>
@@ -826,11 +828,12 @@ function openRetailer(id) { state.retailerId = id; state.rTab = state.rTab || "d
 async function loadRetailerData(r) {
   const key = "rdata:" + r.id;
   try {
-    const [sales, moves] = await Promise.all([
+    const [sales, moves, pays] = await Promise.all([
       q(live("sales", "sale_month,sold_at,report_id,sku,qty,unit_price,amount,notes").eq("location_id", r.id).eq("channel", "retailer").order("sold_at")),
-      q(sb.from("stock_movements").select("moved_on,sku,qty,from_location,to_location,reason,ref,notes,created_at").or(`to_location.eq.${r.id},from_location.eq.${r.id}`).order("moved_on"))
+      q(sb.from("stock_movements").select("moved_on,sku,qty,from_location,to_location,reason,ref,notes,created_at").or(`to_location.eq.${r.id},from_location.eq.${r.id}`).order("moved_on")),
+      q(sb.from("payouts").select("period_month,net_amount,paid,paid_on,paid_amount,report_stage,due_on").eq("location_id", r.id).order("period_month"))
     ]);
-    const d = { sales, moves }; localSet(key, d); return d;
+    const d = { sales, moves, pays }; localSet(key, d); return d;
   } catch (e) { throw e; }
 }
 
@@ -912,8 +915,8 @@ async function renderRetailer() {
       <div class="detail-panel">
         <span class="fav">${esc((r.code || "").slice(0, 3))}</span>
         <h1>${esc(r.name)}</h1>
-        <div class="stats">${st("box", `${stockTotalAt(r.id)} pieces`)}${st("coin", owed ? `${RM(owed)} owed` : "Nothing owed")}${st("pct", `${Math.round(Number(r.commission_rate) * 100)}% commission`)}</div>
-        <div class="detail-actions"><button class="btn" data-a="paste">Paste sales</button><button class="btn" data-a="send">Send stock</button><button class="btn" data-a="tally">Tally</button><button class="btn" data-a="pay">Payouts</button></div>
+        <div class="stats">${st("box", `${stockTotalAt(r.id)} pieces`)}${st("coin", (() => { const u = (state.rPays || []).filter(p => !p.paid); if (!u.length) return owed ? `${RM(owed)} owed` : "Nothing owed"; const n = u[0], late = n.due_on && n.due_on < ymd(new Date()); return `${RM(u.reduce((t, p) => t + Number(p.net_amount), 0))} owed · ${late ? "<b style='color:var(--rust)'>overdue</b> since" : "next due"} ${shortDate(n.due_on || dueDate(n.period_month.slice(0, 7)))}`; })())}${st("pct", `${Math.round(Number(r.commission_rate) * 100)}% commission`)}</div>
+        <div class="detail-actions"><button class="btn" data-a="paste">Sales report</button><button class="btn" data-a="send">Send stock</button><button class="btn" data-a="tally">Stock report</button><button class="btn" data-a="pay">Payouts</button></div>
       </div>
       <div class="detail-body">
         <div class="ttabs">${tabs.map(([k, l]) => `<button data-rt="${k}" aria-pressed="${state.rTab === k}">${l}</button>`).join("")}</div>`;
@@ -923,6 +926,7 @@ async function renderRetailer() {
     view.querySelectorAll("[data-a]").forEach(b => b.onclick = () => ({ paste: pasteSalesSheet, tally: tallySheet, pay: payoutsSheet, send: sendStockSheet })[b.dataset.a](r));
   };
   const draw = d => {
+    state.rPays = d.pays || [];
     const items = analyseRetailer(r, d);
     const body = { dash: rDashboard, stock: rStock, in: rStockIn, sales: rSales, analysis: rAnalysis }[state.rTab](r, d, items);
     const open = [...view.querySelectorAll("details[data-key][open]")].map(e => e.dataset.key);
@@ -1044,7 +1048,8 @@ function rSales(r, d) {
   return `
     <div class="chips" style="margin-top:0">${months.map(m => `<button class="chip" data-mon="${m}" aria-pressed="${m === mon}">${fmtMonth(m)}</button>`).join("")}</div>
     <div class="figures">
-      <div class="figure lead"><div class="label">${fmtMonth(mon)} · ${T("qty")} pieces · ${esc(lines[0]?.report_id || "")}</div><div class="value">${RM(T("amt"))}</div></div>
+      <div class="figure lead"><div class="label">${fmtMonth(mon)} · ${T("qty")} pieces · ${lines.some(x => x.notes === "Mid-month report") ? "mid-month report (not final yet)" : "final report"}</div><div class="value">${RM(T("amt"))}</div></div>
+      ${(() => { const p = (d.pays || []).find(x => x.period_month.slice(0, 7) === mon); return p ? `<div class="figure" style="grid-column:1/-1"><div class="label">Payment for ${fmtMonth(mon)}</div><div class="value" style="font-size:16px">${p.paid ? `Paid ${RM(p.paid_amount ?? p.net_amount)} on ${shortDate(p.paid_on)}` : `${RM(p.net_amount)} due ${shortDate(p.due_on || dueDate(mon))}${(p.due_on || dueDate(mon)) < ymd(new Date()) ? " · overdue" : ""}`}</div></div>` : ""; })()}
       <div class="figure"><div class="label">Gross (retail price)</div><div class="value">${RM(T("gross"))}</div></div>
       <div class="figure"><div class="label">Commission ${Math.round(rate * 100)}%</div><div class="value">−${RM(T("comm"))}</div></div>
       <div class="figure"><div class="label">Net proceeds</div><div class="value">${RM(T("net"))}</div></div>
@@ -1131,63 +1136,228 @@ function parseLines(text, wantAmount, r) {
 }
 const afterRetailerSave = () => { if (state.tab === "retailer") renderRetailer(); else render(); };
 
+/* ---------- shop reports (PDF or pasted text) ---------- */
+const dueDate = mon => { const d = monthStart(mon); return ymd(new Date(d.getFullYear(), d.getMonth() + 1, 15)); };
+let pdfLib;
+async function pdfLines(file) {
+  if (!pdfLib) {
+    await new Promise((ok, bad) => { const s = document.createElement("script"); s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"; s.onload = ok; s.onerror = () => bad(new Error("Couldn't load the PDF reader. Check your connection.")); document.head.append(s); });
+    pdfLib = window.pdfjsLib; pdfLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  }
+  const doc = await pdfLib.getDocument({ data: await file.arrayBuffer() }).promise, out = [];
+  for (let n = 1; n <= doc.numPages; n++) {
+    const items = (await (await doc.getPage(n)).getTextContent()).items.filter(i => i.str.trim());
+    const rows = [];
+    for (const it of items) {          /* put words that sit on the same line back together */
+      const y = it.transform[5], x = it.transform[4];
+      let row = rows.find(r => Math.abs(r.y - y) < 3);
+      if (!row) rows.push(row = { y, parts: [] });
+      row.parts.push({ x, s: it.str.trim() });
+    }
+    rows.sort((a, b) => b.y - a.y).forEach(r => out.push(r.parts.sort((a, b) => a.x - b.x).map(p => p.s).join("  ")));
+  }
+  return out;
+}
+const numsIn = s => (s.replace(/RM/gi, " ").match(/-?\d[\d,]*(\.\d+)?/g) || []).map(v => Number(v.replace(/,/g, "")));
+/* read Art Attic's report PDFs. Three layouts are known:
+   "Yearly Sales Analysis" (code + name, then "Amt" and "Qty" lines), "Month End Stock Balance" (code … UNIT total-qty …),
+   "Customer Price History" (one row per sale: date, doc no+code, name, qty UNIT RM price, sub-total). Anything else: code + numbers on one line. */
+const MON3 = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+function reportDate(s) {
+  let m = String(s).match(/(\d{1,2})[-\s]([A-Za-z]{3})[a-z]*[-\s](\d{2,4})/);
+  if (m) { const y = +m[3] < 100 ? 2000 + +m[3] : +m[3]; return ymd(new Date(y, MON3[m[2].toLowerCase()] - 1, +m[1])); }
+  m = String(s).match(/(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{2,4})/);
+  if (m) { const y = +m[3] < 100 ? 2000 + +m[3] : +m[3]; return ymd(new Date(y, +m[2] - 1, +m[1])); }
+  return null;
+}
+function reportMeta(lines) {
+  const all = lines.join("\n");
+  const kind = /Yearly Sales Analysis/i.test(all) ? "sales" : /Month End Stock Balance/i.test(all) ? "stock" : /Customer Price History/i.test(all) ? "history" : null;
+  const fr = all.match(/From\s+(\S+)\s+to\s+(\S+)/i), asat = all.match(/As At\s+(\S+)/i);
+  const to = fr ? reportDate(fr[2]) : null, at = asat ? reportDate(asat[1]) : null;
+  const end = to || at;
+  /* month the report is about; a stock count taken on the 1st belongs to the month before */
+  let mon = end ? end.slice(0, 7) : null;
+  if (kind === "stock" && at && +at.slice(8, 10) === 1) { const d = new Date(at + "T00:00"); d.setDate(0); mon = ymd(d).slice(0, 7); }
+  const lastDay = end ? new Date(+end.slice(0, 4), +end.slice(5, 7), 0).getDate() : 31;
+  const stage = to ? (+to.slice(8, 10) >= lastDay - 2 ? "final" : "mid") : null;
+  return { kind, mon, stage, date: at || to, to };
+}
+function readReport(lines, r, mode) {
+  const meta = reportMeta(lines), out = [], seen = {};
+  const put = (code, qty, amount) => {
+    code = code.toUpperCase(); const sku = skuForCode(r.id, code), key = sku || code;
+    if (seen[key]) { if (mode === "stock") seen[key].qty = qty; else { seen[key].qty += qty; seen[key].amount = round2((seen[key].amount || 0) + (amount || 0)); } return; }
+    out.push(seen[key] = { code, sku, qty, amount: amount == null ? null : round2(amount) });
+  };
+  const CODE = /\b([A-Z]{2,5}\d{3})\b/i, GLUED = /([A-Z]{2,5}\d{3})\b/i;
+  if (meta.kind === "sales") {
+    let cur = null, amt = null;
+    for (const raw of lines) {
+      const t = raw.trim(), c = t.match(/^([A-Z]{2,5}\d{3})\b/i);
+      if (c) { cur = c[1]; amt = null; continue; }
+      if (/^Sub\s*Total/i.test(t)) { cur = null; continue; }   /* totals repeat the figures above */
+      if (!cur) continue;
+      if (/^Amt\b/i.test(t)) { const n = numsIn(t); amt = n[n.length - 1]; }
+      else if (/^Qty\b/i.test(t)) { const n = numsIn(t); put(cur, Math.round(n[n.length - 1] || 0), amt || 0); cur = null; }
+    }
+  } else if (meta.kind === "stock") {
+    for (const raw of lines) {
+      const m = raw.match(/\b([A-Z]{2,5}\d{3})\b.*?\bUNIT\b\s+([\d,.]+)/i);
+      if (m) { const q = Math.round(Number(m[2].replace(/,/g, ""))); if (q || mode === "stock") put(m[1], q, null); }
+    }
+    if (mode === "stock") for (let i = out.length - 1; i >= 0; i--) if (!out[i].qty && !out[i].sku) out.splice(i, 1);
+  } else if (meta.kind === "history") {
+    for (const raw of lines) {
+      const m = raw.match(/\d{2}-\d{2}-\d{4}\s+\S*?([A-Z]{2,5}\d{3})\b.*?([\d.]+)\s*UNIT\s+RM\s*([\d,.]+)\s+([\d,.]+)\s*$/i);
+      if (m) put(m[1], Math.round(Number(m[2])), Number(m[4].replace(/,/g, "")));
+    }
+  } else {
+    for (const raw of lines) {
+      const line = raw.trim(); if (!line) continue;
+      const tokens = line.split(/[\s,;|]+/);
+      let code = tokens.find(t => skuForCode(r.id, t));
+      if (!code) { const m = line.match(CODE) || line.match(GLUED); if (!m) continue; code = m[1]; }
+      const nums = numsIn(line.slice(line.toUpperCase().indexOf(code.toUpperCase()) + code.length));
+      if (!nums.length) continue;
+      if (mode === "stock") { put(code, [...nums].reverse().find(n => Number.isInteger(n) && n >= 0) ?? 0, null); continue; }
+      let hit = null;
+      for (let i = 0; i < nums.length && !hit; i++) for (let j = 0; j < nums.length && !hit; j++) for (let k = 0; k < nums.length && !hit; k++)
+        if (i !== j && j !== k && i !== k && Number.isInteger(nums[i]) && nums[i] > 0 && nums[i] < 1000 && Math.abs(nums[i] * nums[j] - nums[k]) < 0.06 && nums[k] >= nums[j]) hit = [nums[i], nums[k]];
+      if (hit) put(code, hit[0], hit[1]);
+      else if (nums.length >= 2) put(code, nums.find(n => Number.isInteger(n) && n > 0 && n < 1000) ?? nums[0], nums[nums.length - 1]);
+      else { const sku = skuForCode(r.id, code); put(code, nums[0], sku ? nums[0] * shopPrice(r.id, sku) : 0); }
+    }
+  }
+  out.meta = meta;
+  return out;
+}
+/* shared top part: choose a PDF or paste text */
+const sourcePicker = hint => `
+  <div class="src-pick">
+    <label class="btn primary">Upload PDF<input type="file" accept="application/pdf,.pdf" id="pdfIn" hidden></label>
+    <button type="button" class="btn" id="pasteToggle">Paste text instead</button>
+  </div>
+  <div id="pasteBox" hidden><label class="field"><span>${hint}</span><textarea id="txt"></textarea></label><button type="button" class="btn block" id="readTxt">Read pasted text</button></div>
+  <div id="readStatus" class="small muted" style="margin:6px 2px"></div>`;
+function bindSource(root, onLines) {
+  root.querySelector("#pasteToggle").onclick = () => { root.querySelector("#pasteBox").hidden = false; };
+  root.querySelector("#readTxt").onclick = () => onLines(root.querySelector("#txt").value.split(/\r?\n/), "pasted text");
+  root.querySelector("#pdfIn").onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    root.querySelector("#readStatus").textContent = `Reading ${f.name}…`;
+    try { onLines(await pdfLines(f), f.name); } catch (err) { root.querySelector("#readStatus").textContent = ""; fail(err); }
+    e.target.value = "";
+  };
+}
+const itemSelect = (r, sel) => `<select data-fix>${'<option value="">Which item is this?</option>'}${activeProducts().concat(state.products.filter(p => p.status !== "Active")).map(p => `<option value="${p.sku}" ${sel === p.sku ? "selected" : ""}>${esc(nice(p.name))}</option>`).join("")}</select>`;
+
+/* sales report: one per month. Mid-month is a first look; the end-of-month (whole month) report replaces it and is final */
 function pasteSalesSheet(r) {
+  const now = new Date(), def = now.getDate() <= 22 ? { mon: ym(now), stage: "mid" } : { mon: ym(now), stage: "final" };
+  const lastMonth = ym(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+  if (now.getDate() <= 7) { def.mon = lastMonth; def.stage = "final"; }
+  let lines = [], src = "";
   openSheet(`
     <h2>${esc(r.name)} sales report</h2>
-    <label class="field"><span>Sales month</span><input id="mon" type="month" value="${ym(new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1))}"></label>
-    <label class="field"><span>Paste one line per item: ${esc(r.name)} code, quantity, amount</span><textarea id="txt" placeholder="APO055	2	154&#10;APO057	2	138"></textarea></label>
-    <button class="btn primary block" id="prev">Check report</button><div id="out"></div>`, root => {
-    root.querySelector("#prev").onclick = async () => {
-      const mon = root.querySelector("#mon").value, { lines, errors } = parseLines(root.querySelector("#txt").value, true, r);
-      const reportId = `${r.code}-SALES-${mon}`;
-      let existing = [];
+    <label class="field"><span>Sales month</span><input id="mon" type="month" value="${def.mon}"></label>
+    <div class="chips" id="stage"><button type="button" class="chip" data-stage="mid" aria-pressed="${def.stage === "mid"}">Mid-month report</button><button type="button" class="chip" data-stage="final" aria-pressed="${def.stage === "final"}">End of month (final)</button></div>
+    <p class="small muted" style="margin:-4px 2px 12px">The end-of-month report covers the whole month, so it replaces the mid-month one.</p>
+    ${sourcePicker(`Paste one line per item: ${esc(r.name)} code, quantity, amount`)}
+    <div id="out"></div>`, root => {
+    let stage = def.stage;
+    root.querySelectorAll("[data-stage]").forEach(b => b.onclick = () => { stage = b.dataset.stage; root.querySelectorAll("[data-stage]").forEach(x => x.setAttribute("aria-pressed", x === b)); });
+    const draw = async () => {
+      const mon = root.querySelector("#mon").value, reportId = `${r.code}-SALES-${mon}`;
+      let existing = [], pay = null;
       try { existing = await q(live("sales", "id").eq("report_id", reportId)); } catch {}
-      const total = round2(lines.reduce((t, l) => t + l.amount, 0)), pcs = lines.reduce((t, l) => t + l.qty, 0);
+      try { [pay] = await q(sb.from("payouts").select("*").eq("location_id", r.id).eq("period_month", mon + "-01")); } catch {}
+      const ok = lines.filter(l => l.sku), bad = lines.filter(l => !l.sku);
+      const total = round2(ok.reduce((t, l) => t + Number(l.amount || 0), 0)), pcs = ok.reduce((t, l) => t + Number(l.qty || 0), 0);
       const comm = round2(total * Number(r.commission_rate));
-      root.querySelector("#out").innerHTML = `
-        ${errors.length ? `<div class="warn-banner" style="margin-top:12px">${errors.map(esc).join("<br>")}</div>` : ""}
-        <div class="scroll-x"><table class="simple"><tr><th>Item</th><th class="r">Qty</th><th class="r">Amount</th></tr>
-        ${lines.map(l => { const full = l.qty * shopPrice(r.id, l.sku); return `<tr><td>${esc(prod(l.sku).name)}<div class="small muted">${esc(l.code)}${l.amount < full ? ` · <span style="color:var(--rust)">below retail (${RM(full)})</span>` : ""}</div></td><td class="r">${l.qty}</td><td class="r">${RM(l.amount)}</td></tr>`; }).join("")}
-        <tr><td><strong>${pcs} pieces</strong></td><td></td><td class="r"><strong>${RM(total)}</strong></td></tr>
-        <tr><td class="muted">Commission ${Math.round(Number(r.commission_rate) * 100)}%</td><td></td><td class="r muted">−${RM(comm)}</td></tr>
-        <tr><td>You receive</td><td></td><td class="r"><strong>${RM(total - comm)}</strong></td></tr></table></div>
-        ${existing.length ? `<div class="warn-banner" style="margin-top:10px">${monthLabel(mon)} already has ${existing.length} lines saved. Saving replaces them with this report.</div>` : ""}
-        ${lines.length ? `<button class="btn primary block" id="save" style="margin-top:10px">Save ${monthLabel(mon)} sales</button>` : ""}`;
-      const s = root.querySelector("#save"); if (!s) return;
-      s.onclick = async () => {
+      root.querySelector("#readStatus").textContent = lines.length ? `Read ${lines.length} item${lines.length > 1 ? "s" : ""} from ${src}. Check the numbers, then save.` : (src ? `No ${r.name} codes found in ${src}.` : "");
+      root.querySelector("#out").innerHTML = !lines.length ? "" : `
+        ${bad.length ? `<div class="warn-banner">${bad.length} code${bad.length > 1 ? "s" : ""} not in the ${esc(r.name)} list. Pick the item so it's counted, or leave it to skip.</div>` : ""}
+        <div class="list tight">${lines.map((l, i) => `<div class="row edit-row" data-i="${i}"><div class="grow"><div class="title" style="white-space:normal">${l.sku ? esc(nice(prod(l.sku).name)) : itemSelect(r, null)}</div><div class="small muted">${esc(l.code)}${l.sku ? ` · ${RM(shopPrice(r.id, l.sku))} each` : ""}</div></div>
+          <input class="mini-num" data-k="qty" type="number" inputmode="numeric" value="${l.qty}" aria-label="Quantity"><input class="mini-num wide" data-k="amount" type="number" step="0.01" inputmode="decimal" value="${l.amount ?? ""}" aria-label="Amount"></div>`).join("")}</div>
+        <div class="card" style="margin-top:12px"><table class="simple">
+          <tr><td>${pcs} pieces sold</td><td class="r"><strong>${RM(total)}</strong></td></tr>
+          <tr><td class="muted">Commission ${Math.round(Number(r.commission_rate) * 100)}%</td><td class="r muted">−${RM(comm)}</td></tr>
+          <tr><td>You receive · due ${shortDate(dueDate(mon))}</td><td class="r"><strong>${RM(total - comm)}</strong></td></tr></table></div>
+        ${existing.length ? `<div class="warn-banner">${monthLabel(mon)} already has a ${pay?.report_stage === "mid" ? "mid-month" : "saved"} report (${existing.length} lines${pay ? `, ${RM(pay.sales_amount)}` : ""}). Saving replaces it.${pay?.paid ? " That month is already marked paid; the paid amount stays as it is." : ""}</div>` : ""}
+        <button class="btn primary block" id="save" style="margin-top:6px">Save ${stage === "mid" ? "mid-month" : "final"} report for ${monthLabel(mon)}</button>`;
+      root.querySelectorAll(".edit-row").forEach(row => {
+        const l = lines[Number(row.dataset.i)];
+        row.querySelectorAll("[data-k]").forEach(inp => inp.onchange = () => { l[inp.dataset.k] = Number(inp.value) || 0; draw(); });
+        const fx = row.querySelector("[data-fix]"); if (fx) fx.onchange = () => { l.sku = fx.value || null; if (l.sku && l.amount == null) l.amount = l.qty * shopPrice(r.id, l.sku); draw(); };
+      });
+      const s = root.querySelector("#save"); if (s) s.onclick = async () => {
+        if (!ok.length) return toast("Nothing to save yet");
         const ms = monthStart(mon), last = new Date(ms.getFullYear(), ms.getMonth() + 1, 0, 12);
         try {
-          if (existing.length) await q(sb.from("sales").update({ deleted_at: new Date().toISOString() }).eq("report_id", reportId));
-          await q(sb.from("sales").insert(lines.map(l => ({ sold_at: last.toISOString(), sale_month: mon + "-01", channel: "retailer", location_id: r.id, report_id: reportId, sku: l.sku, qty: l.qty, unit_price: shopPrice(r.id, l.sku), amount: l.amount }))));
-          await q(sb.from("payouts").upsert({ location_id: r.id, period_month: mon + "-01", sales_amount: total, commission: comm, net_amount: round2(total - comm) }, { onConflict: "location_id,period_month" }));
-          await loadStock(); closeSheet(); toast(`${monthLabel(mon)} saved · ${pcs} pieces`); state.rTab = "sales"; state.rMonth = mon; afterRetailerSave();
+          if (existing.length) await q(sb.from("sales").update({ deleted_at: new Date().toISOString() }).eq("report_id", reportId).is("deleted_at", null));
+          await q(sb.from("sales").insert(ok.map(l => ({ sold_at: last.toISOString(), sale_month: mon + "-01", channel: "retailer", location_id: r.id, report_id: reportId, sku: l.sku, qty: l.qty, unit_price: shopPrice(r.id, l.sku), amount: round2(l.amount || 0), notes: stage === "mid" ? "Mid-month report" : null }))));
+          await q(sb.from("payouts").upsert({ location_id: r.id, period_month: mon + "-01", sales_amount: total, commission: comm, net_amount: round2(total - comm), report_stage: stage, report_date: ymd(new Date()), due_on: dueDate(mon) }, { onConflict: "location_id,period_month" }));
+          await loadStock(); closeSheet(); toast(`${monthLabel(mon)} ${stage === "mid" ? "mid-month" : "final"} report saved · ${pcs} pieces`);
+          state.rTab = "sales"; state.rMonth = mon; afterRetailerSave();
         } catch (e) { fail(e); }
       };
     };
+    root.querySelector("#mon").onchange = () => lines.length && draw();
+    bindSource(root, (ls, name) => {
+      const got = readReport(ls, r, "sales"), m = got.meta;
+      if (m.kind === "stock") { root.querySelector("#readStatus").textContent = ""; return toast("That's a stock report. Use Stock report on the shop page."); }
+      src = name; lines = got;
+      if (m.mon) root.querySelector("#mon").value = m.mon;
+      const st = m.kind === "history" ? "mid" : m.stage;
+      if (st) { stage = st; root.querySelectorAll("[data-stage]").forEach(x => x.setAttribute("aria-pressed", x.dataset.stage === st)); }
+      draw();
+    });
   });
 }
 
+/* stock report: the shop's count. Differences are shown to check; nothing changes until you choose */
 function tallySheet(r) {
+  let lines = [], src = "";
   openSheet(`
-    <h2>Tally ${esc(r.name)} stock</h2>
-    <label class="field"><span>Paste the shop's stock balance: code and quantity per line</span><textarea id="txt" placeholder="APO042	4&#10;APO044	6"></textarea></label>
-    <button class="btn primary block" id="go">Compare</button><div id="out"></div>`, root => root.querySelector("#go").onclick = () => {
-      const { lines, errors } = parseLines(root.querySelector("#txt").value, false, r);
-      const shop = Object.fromEntries(lines.map(l => [l.sku, l.qty]));
-      const skus = new Set([...Object.keys(shop), ...state.products.filter(p => stockAt(r.id, p.sku) !== 0).map(p => p.sku)]);
-      const diffs = [...skus].map(sku => ({ sku, app: stockAt(r.id, sku), shop: shop[sku] || 0 })).filter(d => d.app !== d.shop);
-      const pcs = lines.reduce((t, l) => t + l.qty, 0);
-      root.querySelector("#out").innerHTML = (errors.length ? `<div class="warn-banner" style="margin-top:12px">${errors.map(esc).join("<br>")}</div>` : "") + (diffs.length ? `
-        <h3 style="margin-top:14px">${diffs.length} don't match</h3>
-        <table class="simple"><tr><th>Item</th><th class="r">App</th><th class="r">Shop</th></tr>${diffs.map(d => `<tr><td>${esc(prod(d.sku)?.name)}<div class="small muted">${esc(codeAt(r.id, d.sku) || "No code")}</div></td><td class="r">${d.app}</td><td class="r">${d.shop}</td></tr>`).join("")}</table>
-        <p class="small muted">Check for a missing sales report or delivery first. If the shop's count is right, accept it.</p>
-        <button class="btn block" id="accept">Use the shop's counts</button>`
-        : `<div class="card" style="margin-top:12px"><h3>Everything matches</h3><p class="muted">${lines.length} items, ${pcs} pieces.</p></div>`);
-      const a = root.querySelector("#accept"); if (a) a.onclick = async () => {
-        const rows = diffs.map(d => d.shop > d.app ? { sku: d.sku, qty: d.shop - d.app, to_location: r.id, reason: "correction", notes: "Shop stock tally" } : { sku: d.sku, qty: d.app - d.shop, from_location: r.id, reason: "correction", notes: "Shop stock tally" });
-        try { await q(sb.from("stock_movements").insert(rows)); await loadStock(); closeSheet(); toast("Counts updated"); afterRetailerSave(); } catch (e) { fail(e); }
+    <h2>${esc(r.name)} stock report</h2>
+    <label class="field"><span>Date of the shop's count</span><input id="d" type="date" value="${ymd(new Date())}"></label>
+    ${sourcePicker("Paste the shop's stock list: code and quantity per line")}
+    <div id="out"></div>`, root => {
+    const draw = () => {
+      const counted = {}; lines.filter(l => l.sku).forEach(l => counted[l.sku] = (counted[l.sku] || 0) + Number(l.qty || 0));
+      const skus = new Set([...Object.keys(counted), ...state.products.filter(p => stockAt(r.id, p.sku) !== 0).map(p => p.sku)]);
+      const rows = [...skus].map(sku => ({ sku, app: stockAt(r.id, sku), shop: counted[sku] || 0 }));
+      const diffs = rows.filter(d => d.app !== d.shop), bad = lines.filter(l => !l.sku);
+      root.querySelector("#readStatus").textContent = lines.length ? `Read ${lines.length} item${lines.length > 1 ? "s" : ""} from ${src}.` : (src ? `No ${r.name} codes found in ${src}.` : "");
+      if (!lines.length) { root.querySelector("#out").innerHTML = ""; return; }
+      root.querySelector("#out").innerHTML = `
+        ${bad.length ? `<div class="warn-banner">${bad.map(b => esc(b.code)).join(", ")} ${bad.length > 1 ? "aren't" : "isn't"} in the ${esc(r.name)} list. Pick the item below.</div>
+          <div class="list tight" style="margin-bottom:12px">${bad.map(b => `<div class="row" data-bad="${lines.indexOf(b)}"><div class="grow">${itemSelect(r, null)}<div class="small muted">${esc(b.code)} · shop count ${b.qty}</div></div></div>`).join("")}</div>` : ""}
+        <div class="figures"><div class="figure"><div class="label">Shop counted</div><div class="value">${Object.values(counted).reduce((a, b) => a + b, 0)}</div></div><div class="figure"><div class="label">App says</div><div class="value">${stockTotalAt(r.id)}</div></div></div>
+        ${diffs.length ? `<p class="small muted" style="margin:0 2px 10px">${diffs.length} item${diffs.length > 1 ? "s" : ""} to check. A difference can just be sales made after the sales report, so it's best to accept counts with the final end-of-month report.</p>
+          <div class="list tight">${diffs.map(d => `<label class="row diff-row"><input type="checkbox" data-acc="${d.sku}" style="width:auto;min-height:0;box-shadow:none"><div class="grow"><div class="title" style="white-space:normal">${esc(nice(prod(d.sku)?.name || d.sku))}</div><div class="small muted">${esc(codeAt(r.id, d.sku) || "No code")} · app ${d.app} · shop ${d.shop}</div></div><span class="tag ${d.shop < d.app ? "brass" : "green"}">${d.shop > d.app ? "+" : ""}${d.shop - d.app}</span></label>`).join("")}</div>
+          <button type="button" class="link" id="all" style="margin:10px 2px">Select all</button>`
+        : `<div class="card"><h3>Everything matches</h3><p class="muted">${lines.length} items.</p></div>`}
+        <button class="btn primary block" id="save" style="margin-top:8px">Save stock report${diffs.length ? " (use shop's count for ticked items)" : ""}</button>`;
+      root.querySelectorAll("[data-bad]").forEach(row => row.querySelector("[data-fix]").onchange = e => { lines[Number(row.dataset.bad)].sku = e.target.value || null; draw(); });
+      const all = root.querySelector("#all"); if (all) all.onclick = () => root.querySelectorAll("[data-acc]").forEach(c => c.checked = true);
+      root.querySelector("#save").onclick = async () => {
+        const acc = [...root.querySelectorAll("[data-acc]:checked")].map(c => diffs.find(d => d.sku === c.dataset.acc));
+        const date = root.querySelector("#d").value;
+        try {
+          await q(sb.from("shop_stock_reports").insert({ location_id: r.id, report_date: date, lines: lines.map(l => ({ code: l.code, sku: l.sku, qty: l.qty })), notes: src }));
+          if (acc.length) await q(sb.from("stock_movements").insert(acc.map(d => d.shop > d.app ? { moved_on: date, sku: d.sku, qty: d.shop - d.app, to_location: r.id, reason: "correction", notes: "Shop stock report" } : { moved_on: date, sku: d.sku, qty: d.app - d.shop, from_location: r.id, reason: "correction", notes: "Shop stock report" })));
+          await loadStock(); closeSheet(); toast(acc.length ? `Stock report saved · ${acc.length} count${acc.length > 1 ? "s" : ""} updated` : "Stock report saved"); afterRetailerSave();
+        } catch (e) { fail(e); }
       };
+    };
+    bindSource(root, (ls, name) => {
+      const got = readReport(ls, r, "stock"), m = got.meta;
+      if (m.kind === "sales" || m.kind === "history") { root.querySelector("#readStatus").textContent = ""; return toast("That's a sales report. Use Sales report on the shop page."); }
+      src = name; lines = got; if (m.date) root.querySelector("#d").value = m.date; draw();
     });
+  });
 }
 
 /* delivery to a shop: pick items by name, type quantities; the shop code can be added now or later */
@@ -1238,7 +1408,7 @@ async function payoutsSheet(r) {
   openSheet(`
     <h2 style="margin-top:0">${esc(r.name)} payouts</h2>
     <div class="list tight">${rows.map(p => `<div class="row"><div class="grow"><div class="title">${monthLabel(p.period_month.slice(0, 7))} sales</div>
-      <div class="small muted">${p.sales_amount ? `Sales ${RM(p.sales_amount)} · ` : ""}${p.paid ? `Paid ${p.paid_on ? shortDate(p.paid_on) : ""}` : "Not paid yet"}</div></div>
+      <div class="small muted">${p.sales_amount ? `Sales ${RM(p.sales_amount)} · ` : ""}${p.report_stage === "mid" ? "mid-month figure · " : ""}${p.paid ? `Paid ${p.paid_on ? shortDate(p.paid_on) : ""}` : `Due ${shortDate(p.due_on || dueDate(p.period_month.slice(0, 7)))}${(p.due_on || dueDate(p.period_month.slice(0, 7))) < ymd(new Date()) ? " · overdue" : ""}`}</div></div>
       <span class="num">${RM(p.paid ? (p.paid_amount ?? p.net_amount) : p.net_amount)}</span>
       ${p.paid ? `<span class="tag">Paid</span>` : `<button class="btn" data-pay="${p.id}" style="min-height:36px">Mark paid</button>`}</div>`).join("") || `<div class="empty">No payouts yet.</div>`}</div>
     <button class="btn block" id="close">Close</button>`, root => {

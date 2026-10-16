@@ -443,3 +443,12 @@ details.group > summary { padding-left: 14px; }
 .sell-tabs .ctab.g-sky { background: var(--g-sky); } .sell-tabs .ctab.g-sunset { background: var(--g-sunset); }
 .sell-tabs .ctab.g-coral { background: var(--g-coral); } .sell-tabs .ctab.g-sea { background: var(--g-sea); }
 .sell-tabs .ctab.g-mint { background: var(--g-mint); } .sell-tabs .ctab.g-dusk { background: var(--g-dusk); }
+
+/* report pages */
+.src-pick { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.src-pick .btn { cursor: pointer; }
+.edit-row { gap: 8px; }
+.mini-num { width: 56px !important; min-height: 38px !important; padding: 6px 8px !important; text-align: right; flex: none; }
+.mini-num.wide { width: 86px !important; }
+.edit-row select { min-height: 38px; padding: 6px 30px 6px 10px; font-size: 13px; }
+.diff-row { cursor: pointer; }
