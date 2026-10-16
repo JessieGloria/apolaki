@@ -135,15 +135,16 @@ async function loadStock() {
 
 /* ---------- auth ---------- */
 function renderLogin(msg) {
-  $("#tabs").hidden = true;
+  $("#tabs").hidden = true; $("#top").hidden = true;
   $("#view").innerHTML = `
   <div class="login">
-    <h1>Sign in</h1>
-    <p class="muted">Use the email and password set up for Apolaki.</p>
-    ${msg ? `<p class="tag rust" style="display:inline-block">${esc(msg)}</p>` : ""}
+    <div class="mark"><svg viewBox="0 0 64 56" aria-hidden="true"><path d="M32 4 L60 52 H4 Z" fill="none" stroke="currentColor" stroke-width="6" stroke-linejoin="round"/><path d="M21 40 L32 24 L43 40" fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/></svg></div>
+    <h1>Apolaki</h1>
+    <p class="muted">One piece, one sale, one market at a time.</p>
+    ${msg ? `<p class="tag rust" style="margin-bottom:10px">${esc(msg)}</p>` : ""}
     <form id="loginForm">
-      <label class="field"><span>Email</span><input name="email" type="email" autocomplete="username" required></label>
-      <label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label>
+      <label class="field"><span>Email</span><input name="email" type="email" placeholder="Email" autocomplete="username" required></label>
+      <label class="field"><span>Password</span><input name="password" type="password" placeholder="Password" autocomplete="current-password" required></label>
       <button class="btn primary block" type="submit">Sign in</button>
     </form>
   </div>`;
@@ -166,7 +167,8 @@ async function start(session) {
       return;
     }
   }
-  $("#tabs").hidden = false;
+  $("#tabs").hidden = false; $("#top").hidden = false;
+  try { const { data: me } = await sb.from("allowed_users").select("display_name").eq("email", state.user.email).maybeSingle(); state.name = me && me.display_name ? me.display_name.split(" ")[0] : null; } catch {}
   const av = $("#avatar"); av.hidden = false; av.textContent = (state.user.email || "?").slice(0, 2).toUpperCase();
   av.onclick = () => openSheet(`<h2 style="margin-top:0">Account</h2><p class="muted">${esc(state.user.email)}</p><button class="btn danger block" id="so">Sign out</button>`, r => r.querySelector("#so").onclick = () => { closeSheet(); sb.auth.signOut(); });
   await loadAll(); updateBadge(); sync(); render();
@@ -184,6 +186,7 @@ function go(tab) {
 }
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => go(b.dataset.tab));
 function render() {
+  document.body.classList.remove("has-cart");
   document.querySelectorAll("#tabs button").forEach(b => b.setAttribute("aria-current", b.dataset.tab === state.tab ? "page" : "false"));
   ({ home: renderHome, market: renderSell, retailers: renderRetailers, stock: renderStock, accounts: renderAccounts })[state.tab]();
 }
@@ -193,24 +196,66 @@ function render() {
    ========================================================= */
 async function fetchHomeData() {
   const now = new Date(), ys = new Date(now.getFullYear(), 0, 1), ye = new Date(now.getFullYear() + 1, 0, 1);
-  const [sales, pays, exps, unpaid] = await Promise.all([
+  const pm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+  const [sales, pays, exps, unpaid, recentSales, recentMoves, lastReports] = await Promise.all([
     q(sb.from("sales").select("sold_at,amount,channel").neq("channel", "retailer").gte("sold_at", ys.toISOString()).lt("sold_at", ye.toISOString())),
     q(sb.from("payouts").select("paid_on,paid_amount,net_amount").eq("paid", true).gte("paid_on", ymd(ys)).lt("paid_on", ymd(ye))),
-    q(sb.from("expenses").select("spent_on,amount").gte("spent_on", ymd(ys)).lt("spent_on", ymd(ye))),
-    q(sb.from("payouts").select("*").eq("paid", false).order("period_month"))
+    q(sb.from("expenses").select("spent_on,amount,description,category").gte("spent_on", ymd(ys)).lt("spent_on", ymd(ye))),
+    q(sb.from("payouts").select("*").eq("paid", false).order("period_month")),
+    q(sb.from("sales").select("sold_at,amount,qty,sku,channel,location_id,cart_id,report_id").order("sold_at", { ascending: false }).limit(60)),
+    q(sb.from("stock_movements").select("moved_on,qty,sku,from_location,to_location,reason,ref,created_at").order("moved_on", { ascending: false }).order("created_at", { ascending: false }).limit(30)),
+    q(sb.from("payouts").select("location_id").eq("period_month", ymd(pm)))
   ]);
-  return { year: now.getFullYear(), sales, pays, exps, unpaid };
+  return { year: now.getFullYear(), sales, pays, exps, unpaid, recentSales, recentMoves, lastReports };
 }
 
 async function renderHome() {
   const view = $("#view");
   const cached = localGet("homeData", null);
-  if (cached) drawHome(cached); else view.innerHTML = `<h1>Overview</h1>${SKEL}`;
+  if (cached && cached.lastReports) drawHome(cached); else view.innerHTML = `<p class="hello">${greeting()}</p><h1>Overview</h1>${SKEL}`;
   try {
     const fresh = await fetchHomeData();
     if (JSON.stringify(fresh) !== JSON.stringify(cached)) { localSet("homeData", fresh); if (state.tab === "home") drawHome(fresh, true); }
-  } catch { if (!cached) view.innerHTML = `<h1>Overview</h1><div class="card">You're offline. The Sell tab still works and syncs later.</div>`; }
+  } catch { if (!cached) view.innerHTML = `<p class="hello">${greeting()}</p><h1>Overview</h1><div class="warn-banner">You're offline. The Sell tab still works and syncs later.</div>`; }
 }
+
+function greeting() {
+  const h = new Date().getHours();
+  return `${h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"}${state.name ? ", " + esc(state.name) : ""}`;
+}
+
+/* one timeline of what happened lately: sales carts, retailer reports, stock moves, expenses */
+function recentActivity(d) {
+  const ev = [], carts = {};
+  for (const s of d.recentSales || []) {
+    if (s.report_id) { const k = "r" + s.report_id; (carts[k] = carts[k] || { at: s.sold_at, kind: "report", loc: s.location_id, rep: s.report_id, qty: 0, amt: 0 }); carts[k].qty += s.qty || 0; carts[k].amt += Number(s.amount); continue; }
+    const k = "c" + (s.cart_id || s.sold_at);
+    (carts[k] = carts[k] || { at: s.sold_at, kind: "sale", loc: s.location_id, ch: s.channel, qty: 0, amt: 0, items: [] });
+    carts[k].qty += s.qty || 0; carts[k].amt += Number(s.amount); if (s.sku) carts[k].items.push(prod(s.sku)?.name || s.sku);
+  }
+  for (const c of Object.values(carts)) {
+    if (c.kind === "report") ev.push({ at: c.at, chip: "Shop report", title: `${loc(c.loc)?.name || "Retailer"} · ${c.qty} pieces sold`, right: RM(c.amt) });
+    else { const where = c.ch === "online" ? "Online order" : loc(c.loc)?.name || "Market";
+      ev.push({ at: c.at, chip: c.ch === "online" ? "Online" : "Market sale", title: c.items.length ? `${c.items.slice(0, 2).join(", ")}${c.items.length > 2 ? ` +${c.items.length - 2}` : ""}` : where, sub: c.items.length && c.ch !== "online" ? where : "", right: RM(c.amt) }); }
+  }
+  const moves = {};
+  for (const m of d.recentMoves || []) { const k = [m.moved_on, m.from_location, m.to_location, m.reason, m.ref].join("|"); (moves[k] = moves[k] || { ...m, n: 0 }).n += m.qty; }
+  const why = { restock: "Restock", transfer: "Stock moved", return: "Returned", loss: "Lost / damaged", correction: "Count fixed" };
+  for (const m of Object.values(moves)) {
+    const to = loc(m.to_location)?.name, from = loc(m.from_location)?.name;
+    ev.push({ at: m.moved_on === ymd(new Date(m.created_at)) ? m.created_at : m.moved_on, chip: why[m.reason] || m.reason, title: `${m.n} piece${m.n > 1 ? "s" : ""}${from ? " from " + from : ""}${to ? " to " + to : ""}`, sub: m.ref || "" });
+  }
+  const ts = x => new Date(String(x).length === 10 ? x + "T23:59" : x).getTime();
+  return ev.sort((a, b) => ts(b.at) - ts(a.at)).slice(0, 6);
+}
+const ago = s => {
+  const d = new Date(String(s).length === 10 ? s + "T00:00" : s), t = new Date(); t.setHours(0, 0, 0, 0);
+  const days = Math.round((t - new Date(d.getFullYear(), d.getMonth(), d.getDate())) / 864e5);
+  const time = d.toLocaleTimeString("en-MY", { hour: "numeric", minute: "2-digit" });
+  if (days < 0) return d.toLocaleDateString("en-MY", { day: "numeric", month: "short" });
+  if (String(s).length === 10) return days <= 0 ? "Today" : days === 1 ? "Yesterday" : d.toLocaleDateString("en-MY", { day: "numeric", month: "short", year: d.getFullYear() === t.getFullYear() ? undefined : "numeric" });
+  return days <= 0 ? `Today, ${time}` : days === 1 ? `Yesterday, ${time}` : d.toLocaleDateString("en-MY", { day: "numeric", month: "short" });
+};
 
 function drawHome(d, quiet) {
   const view = $("#view"), now = new Date(), curM = ym(now), period = state.homePeriod || "month";
@@ -221,57 +266,79 @@ function drawHome(d, quiet) {
   const src = { Shops: 0, Markets: 0, Online: 0 };
   d.sales.forEach(s => { inc[monthOf(s.sold_at)] += Number(s.amount); if (inPeriod(s.sold_at)) src[s.channel === "online" ? "Online" : "Markets"] += Number(s.amount); });
   d.pays.forEach(p => { const a = Number(p.paid_amount ?? p.net_amount); inc[monthOf(p.paid_on)] += a; if (inPeriod(p.paid_on)) src.Shops += a; });
-  const pending = outbox().reduce((t, r) => t + Number(r.amount), 0);
-  src[outbox().some(r => r.channel === "online") ? "Online" : "Markets"] += pending; inc[curM] += pending;
+  outbox().forEach(r => { src[r.channel === "online" ? "Online" : "Markets"] += Number(r.amount); inc[curM] += Number(r.amount); });
   const moneyIn = Object.values(src).reduce((a, b) => a + b, 0);
   const spent = d.exps.filter(e => inPeriod(e.spent_on)).reduce((t, e) => t + Number(e.amount), 0);
   const due = d.unpaid.reduce((t, r) => t + Number(r.net_amount), 0);
   const shown = months.filter(m => m <= curM).slice(-8);
   const max = Math.max(1, ...shown.map(m => inc[m]));
   const pieces = stockTotalAt("all");
+  const label = period === "year" ? String(d.year) : now.toLocaleDateString("en-MY", { month: "long" });
 
-  const srcColors = { Shops: "var(--blue)", Markets: "var(--orange)", Online: "var(--purple)" };
+  const srcColors = { Shops: "var(--mauve)", Markets: "var(--peach)", Online: "var(--sage)" };
   const C = 2 * Math.PI * 42; let off = 0;
+  const parts = Object.values(src).filter(x => x > 0).length;
   const arcs = Object.entries(src).filter(([, v]) => v > 0).map(([k, v]) => {
-    const len = moneyIn ? C * v / moneyIn : 0, gap = Object.values(src).filter(x => x > 0).length > 1 ? 2.5 : 0;
-    const a = `<circle cx="50" cy="50" r="42" fill="none" stroke="${srcColors[k]}" stroke-width="13" stroke-linecap="round" stroke-dasharray="${Math.max(0, len - gap)} ${C}" stroke-dashoffset="${-off}"/>`;
+    const len = moneyIn ? C * v / moneyIn : 0, gap = parts > 1 ? 2.5 : 0;
+    const a = `<circle cx="50" cy="50" r="42" fill="none" stroke="${srcColors[k]}" stroke-width="12" stroke-linecap="round" stroke-dasharray="${Math.max(0, len - gap)} ${C}" stroke-dashoffset="${-off}"/>`;
     off += len; return a;
   }).join("");
 
   const places = [workshop(), ...retailers(), ...state.locations.filter(l => l.type === "market" && l.active)].filter(Boolean);
-  const placeColor = l => l.type === "workshop" ? "var(--teal)" : l.type === "retailer" ? "var(--blue)" : "var(--orange)";
+  const placeColor = l => l.type === "workshop" ? "var(--teal)" : l.type === "retailer" ? "var(--mauve)" : "var(--peach)";
   const placeIcon = l => l.type === "workshop" ? "tool" : l.type === "retailer" ? "shop" : "tent";
   const low = activeProducts().map(p => ({ p, n: stockAt("all", p.sku) })).filter(x => x.n <= 1).sort((a, b) => a.n - b.n);
-  const label = period === "year" ? String(d.year) : now.toLocaleDateString("en-MY", { month: "long" });
+  const out = low.filter(x => x.n <= 0);
+  const activeMarkets = state.locations.filter(l => l.type === "market" && l.active);
+
+  /* needs attention: things that want an action */
+  const attn = [];
+  d.unpaid.filter(u => u.period_month.slice(0, 7) < curM).forEach(u => attn.push({ c: "var(--coral)", t: `${loc(u.location_id)?.name || "Shop"} hasn't paid ${monthLabel(u.period_month.slice(0, 7))}`, s: RM(u.net_amount) + " due", go: "retailers" }));
+  const prevM = ym(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+  retailers().forEach(r => { const has = (d.lastReports || []).some(p => p.location_id === r.id); if (!has && now.getDate() >= 5) attn.push({ c: "var(--peach)", t: `No ${monthStart(prevM).toLocaleDateString("en-MY", { month: "long" })} sales report from ${r.name} yet`, s: "Paste it in Retailers", go: "retailers" }); });
+  activeMarkets.filter(m => m.end_date && m.end_date < ymd(now)).forEach(m => attn.push({ c: "var(--peach)", t: `${m.name} ended ${shortDate(m.end_date)}`, s: "End the market to bring stock back", go: "market", sell: m.id }));
+  if (out.length) attn.push({ c: "var(--coral)", t: `${out.length} piece${out.length > 1 ? "s" : ""} sold out`, s: out.slice(0, 3).map(x => x.p.name).join(", "), go: "stock" });
+  if (outbox().length) attn.push({ c: "var(--mauve)", t: `${outbox().length} sale line${outbox().length > 1 ? "s" : ""} waiting to sync`, s: "Will send when you're online", go: "market" });
+
+  const acts = recentActivity(d);
+  const tile = (cls, n, l, go, icon, money) => `<button class="stat ${cls}" data-go="${go}"><svg viewBox="0 0 24 24">${ICONS[icon]}</svg><div class="n${money ? " money" : ""}">${n}</div><div class="l">${l}</div></button>`;
 
   view.innerHTML = `
+    <p class="hello">${greeting()}</p>
     <h1>Overview</h1>
-    <div class="seg"><button data-p="month" aria-pressed="${period === "month"}">This month</button><button data-p="year" aria-pressed="${period === "year"}">This year</button></div>
-    <div class="card">
+    <div class="hero">
+      <div class="hero-seg"><button data-p="month" aria-pressed="${period === "month"}">Month</button><button data-p="year" aria-pressed="${period === "year"}">Year</button></div>
       <div class="eyebrow">MONEY IN · ${esc(label.toUpperCase())}</div>
-      <div class="num" style="font-size:32px;font-weight:700;margin-top:2px">${RM(moneyIn)}</div>
-      <div class="bars">${shown.map((m, i) => `<div class="bar ${m === curM ? "now" : ""}"><i style="height:${Math.max(4, inc[m] / max * 100)}%;background:${COLORS[(i + months.indexOf(shown[0])) % 12]};animation-delay:${quiet ? 0 : i * 40}ms"></i><span>${monthStart(m).toLocaleDateString("en-MY", { month: "short" })}</span></div>`).join("")}</div>
+      <div class="big">${RM(moneyIn)}</div>
+      <div class="hero-chips">
+        <span class="hero-chip">Spent ${RM(spent)}</span>
+        <span class="hero-chip">${moneyIn - spent >= 0 ? "Left" : "Short"} ${RM(Math.abs(moneyIn - spent))}</span>
+      </div>
     </div>
-    <div class="list">
-      <div class="row" data-go="accounts">${ico("in", "var(--green)")}<div class="grow"><div class="title">Money in</div><div class="sub">${label}</div></div><span class="value">${RM(moneyIn)}</span>${CHEV}</div>
-      <div class="row" data-go="accounts">${ico("out", "var(--red)")}<div class="grow"><div class="title">Spent</div><div class="sub">${label}</div></div><span class="value">${RM(spent)}</span>${CHEV}</div>
-      <div class="row" data-go="accounts">${ico("left", "var(--blue)")}<div class="grow"><div class="title">Left</div><div class="sub">${moneyIn - spent >= 0 ? "Money in minus spent" : "Spent more than came in"}</div></div><span class="value" style="${moneyIn - spent < 0 ? "color:var(--red)" : ""}">${RM(moneyIn - spent)}</span>${CHEV}</div>
-      <div class="row" data-go="retailers">${ico("clock", "var(--orange)")}<div class="grow"><div class="title">Shop payouts due</div><div class="sub">${d.unpaid.length ? d.unpaid.map(u => monthStart(u.period_month.slice(0, 7)).toLocaleDateString("en-MY", { month: "short" })).join(", ") : "All paid"}</div></div><span class="value">${RM(due)}</span>${CHEV}</div>
-      <div class="row" data-go="stock">${ico("box", "var(--purple)")}<div class="grow"><div class="title">Pieces in stock</div><div class="sub">${low.length ? `${low.length} running low` : "All stocked"}</div></div><span class="value">${pieces}</span>${CHEV}</div>
+    <div class="tile-grid">
+      ${tile("s-coral", RM(due), "Payouts due", "retailers", "clock", true)}
+      ${tile("s-sage", pieces, "Pieces in stock", "stock", "box")}
+      ${tile("s-peach", low.length, "Running low", "stock", "warn")}
+      ${tile("s-mauve", activeMarkets.length, activeMarkets.length === 1 ? "Market open" : "Markets open", "market", "tent")}
+    </div>
+    ${attn.length ? `<h2>Needs attention</h2><div class="card">${attn.map((a, i) => `<div class="attn" data-ai="${i}"><span class="dot" style="background:${a.c}"></span><div class="grow">${esc(a.t)}<span class="small muted">${esc(a.s)}</span></div>${CHEV}</div>`).join("")}</div>` : ""}
+    <h2>Money in by month</h2>
+    <div class="card">
+      <div class="bars">${shown.map((m, i) => `<div class="bar ${m === curM ? "now" : ""}"><i style="height:${Math.max(4, inc[m] / max * 100)}%;animation-delay:${quiet ? 0 : i * 40}ms"></i><span>${monthStart(m).toLocaleDateString("en-MY", { month: "short" })}</span></div>`).join("")}</div>
     </div>
     ${moneyIn ? `<h2>Where it came from</h2>
     <div class="card">
-      <div class="donut-wrap"><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="42" fill="none" stroke="var(--card-2)" stroke-width="13"/>${arcs}</svg>
-        <div class="donut-mid"><div class="eyebrow">${esc(label.toUpperCase())}</div><div class="value num">${RM(moneyIn)}</div></div></div>
+      <div class="donut-wrap"><svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="42" fill="none" stroke="var(--input-bg)" stroke-width="12"/>${arcs}</svg>
+        <div class="donut-mid"><div class="small muted">${esc(label)}</div><div class="value num">${RM(moneyIn)}</div></div></div>
       <div class="legend">${Object.entries(src).map(([k, v]) => `<div><b style="background:${srcColors[k]}"></b>${k}<span class="num">${RM(v)}</span></div>`).join("")}</div>
     </div>` : ""}
     <h2>Stock by place</h2>
-    <div class="tiles">${places.map(l => { const n = stockTotalAt(l.id); return `<button class="ttile" data-place="${l.id}">${ico(placeIcon(l), placeColor(l), true)}<div class="name">${esc(l.name)}</div><div class="sub">${n} pieces</div><div class="meter"><i style="width:${pieces ? n / pieces * 100 : 0}%;background:${placeColor(l)}"></i></div><div class="sub small">${pieces ? Math.round(n / pieces * 100) : 0}% of stock</div></button>`; }).join("")}</div>
-    ${low.length ? `<h2>Running low</h2><div class="list tight">${low.slice(0, 10).map(x => `<div class="row" data-sku="${x.p.sku}">${ico("warn", x.n <= 0 ? "var(--red)" : "var(--orange)")}<div class="grow"><div class="title">${esc(x.p.name)}</div><div class="sub">${x.p.sku}</div></div><span class="tag ${x.n <= 0 ? "rust" : "brass"}">${x.n <= 0 ? "Sold out" : "1 left"}</span></div>`).join("")}</div>` : ""}`;
+    <div class="tiles">${places.map(l => { const n = stockTotalAt(l.id); return `<button class="ttile" data-place="${l.id}">${ico(placeIcon(l), placeColor(l), true)}<div class="name">${esc(l.name)}</div><div class="sub">${n} pieces</div><div class="meter"><i style="width:${pieces ? n / pieces * 100 : 0}%;background:${placeColor(l)}"></i></div><div class="sub">${pieces ? Math.round(n / pieces * 100) : 0}% of stock</div></button>`; }).join("")}</div>
+    ${acts.length ? `<h2>Recent activity</h2><div class="tl">${acts.map(a => `<div class="tl-item"><span class="tl-dot"></span><div class="tl-card"><div class="tl-meta"><span class="tl-chip">${esc(a.chip)}</span><span>${ago(a.at)}</span></div><div class="tl-body"><span>${esc(a.title)}${a.sub ? `<span class="small muted" style="display:block">${esc(a.sub)}</span>` : ""}</span>${a.right ? `<strong>${a.right}</strong>` : ""}</div></div></div>`).join("")}</div>` : ""}`;
   view.querySelectorAll("[data-p]").forEach(b => b.onclick = () => { state.homePeriod = b.dataset.p; drawHome(d, true); });
   view.querySelectorAll("[data-go]").forEach(r => r.onclick = () => go(r.dataset.go));
+  view.querySelectorAll("[data-ai]").forEach(r => r.onclick = () => { const a = attn[Number(r.dataset.ai)]; if (a.sell) { state.sellAt = a.sell; localSet("sellAt", a.sell); } go(a.go); });
   view.querySelectorAll("[data-place]").forEach(t => t.onclick = () => { state.stockLoc = Number(t.dataset.place); go("stock"); });
-  view.querySelectorAll(".row[data-sku]").forEach(r => r.onclick = () => adjustSheet(prod(r.dataset.sku), workshop().id));
 }
 
 /* =========================================================
@@ -304,6 +371,7 @@ async function renderSell() {
   const items = activeProducts().filter(p => !s || p.name.toLowerCase().includes(s) || p.sku.toLowerCase().includes(s))
     .map(p => ({ p, left: stockAt(t.stockLoc, p.sku) })).sort((a, b) => (b.left > 0) - (a.left > 0) || a.p.sku.localeCompare(b.p.sku));
   const n = cartLines().reduce((x, l) => x + l.qty, 0);
+  document.body.classList.toggle("has-cart", n > 0);
   view.innerHTML = `<h1>Sell</h1>
     <label class="field"><span>Selling at</span><select id="sellAt">${choices}</select></label>
     <div class="btns">
@@ -453,12 +521,16 @@ function endMarketSheet(m) {
 /* =========================================================
    RETAILERS
    ========================================================= */
-function renderRetailers() {
+async function renderRetailers() {
   const view = $("#view");
-  view.innerHTML = `<h1>Retailers</h1>
+  let owed = localGet("owed", {});
+  const draw = () => { view.innerHTML = `<h1>Retailers</h1>
     ${retailers().map(r => `<div class="card">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h3>${esc(r.name)}</h3><span class="tag">${esc(r.code || "")} · ${Math.round(Number(r.commission_rate) * 100)}%</span></div>
-      <p class="muted small">${stockTotalAt(r.id)} pieces on their shelf</p>
+      <div class="figures" style="margin:12px 0 6px">
+        <div class="figure"><div class="label">On their shelf</div><div class="value">${stockTotalAt(r.id)}</div></div>
+        <div class="figure"><div class="label">Owed to you</div><div class="value" style="${owed[r.id] ? "color:var(--rust)" : ""}">${RM(owed[r.id] || 0)}</div></div>
+      </div>
       <div class="btns">
         <button class="btn" data-a="paste" data-id="${r.id}">Paste sales</button>
         <button class="btn" data-a="tally" data-id="${r.id}">Tally stock</button>
@@ -480,6 +552,13 @@ function renderRetailers() {
       try { const [r] = await q(sb.from("locations").insert({ name: f.get("name").trim(), type: "retailer", code: f.get("code").trim().toUpperCase(), commission_rate: (Number(f.get("rate")) || 0) / 100 }).select());
         state.locations.push(r); closeSheet(); toast("Retailer added"); render(); } catch (err) { fail(err); }
     });
+  };
+  draw();
+  try {
+    const rows = await q(sb.from("payouts").select("location_id,net_amount").eq("paid", false));
+    const o = {}; rows.forEach(p => o[p.location_id] = (o[p.location_id] || 0) + Number(p.net_amount));
+    if (JSON.stringify(o) !== JSON.stringify(owed)) { owed = o; localSet("owed", o); if (state.tab === "retailers" && $("#sheet").hidden) draw(); }
+  } catch {}
 }
 
 /* reads lines like "APO055  2  154" or "APO055 TEXTURED EARRINGS 2 154.00" */
