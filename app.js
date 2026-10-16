@@ -7,7 +7,7 @@ const sb = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseKey);
 const state = {
   user: null, tab: "home",
   products: [], locations: [], stock: [],
-  sellAt: localGet("sellAt", null), cart: {}, payment: "Cash", discount: 0,
+  sellAt: localGet("sellAt", null), sellCat: localGet("sellCat", "all"), cart: {}, payment: "Cash", discount: 0,
   stockLoc: "all", search: "", codes: [], openCats: new Set()
 };
 
@@ -93,6 +93,7 @@ const skuForCode = (locId, code) => state.codes.find(c => c.location_id === Numb
 /* shop price: the retailer's own price for an item, falling back to the original price */
 const shopPrice = (locId, sku) => { const c = state.codes.find(x => x.location_id === Number(locId) && x.sku === sku); return c && c.price != null ? Number(c.price) : Number(prod(sku)?.retail_price || 0); };
 const CAT_ORDER = ["Bracelet", "Earrings", "Ring", "Neck Piece"];
+const CAT_PLURAL = { Bracelet: "Bracelets", Earrings: "Earrings", Ring: "Rings", "Neck Piece": "Neck pieces" };
 const CAT_G = { Bracelet: "g-sky", Earrings: "g-sunset", Ring: "g-coral", "Neck Piece": "g-sea" };
 const catG = c => CAT_G[c] || ["g-mint", "g-dusk", "g-sea"][String(c || "").length % 3];
 /* small jewellery icons for each category */
@@ -113,7 +114,31 @@ function groupByCategory(ps) {
 const itemSub = p => [p.category, p.size && p.size !== "Free" ? p.size : null].filter(Boolean).join(" · ");
 const initials = name => String(name || "?").replace(/\(.*?\)/g, "").split(/\s+/).filter(w => /[A-Za-z]/.test(w)).slice(0, 2).map(w => w[0].toUpperCase()).join("");
 const newKey = () => "ITM" + String(Math.max(0, ...state.products.filter(x => /^ITM\d+$/.test(x.sku)).map(x => parseInt(x.sku.slice(3), 10))) + 1).padStart(4, "0");
-const photo = p => p && p.photo ? `https://drive.google.com/thumbnail?id=${encodeURIComponent(p.photo)}&sz=w300` : null;
+/* item photos: old ones are copies of the Drive photos kept inside the app (photos/<id>.jpg);
+   new ones are taken in the app and stored in Supabase (full link). Both load on any phone, signed in to Google or not. */
+const photo = p => !p || !p.photo ? null : /^https?:/.test(p.photo) ? p.photo : `photos/${encodeURIComponent(p.photo)}.jpg`;
+/* shrink a picked photo to an 800px square JPEG before uploading (fast on market signal) */
+function squareJpeg(file, size = 800) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onload = () => {
+      const s = Math.min(img.naturalWidth, img.naturalHeight), c = document.createElement("canvas");
+      c.width = c.height = size;
+      c.getContext("2d").drawImage(img, (img.naturalWidth - s) / 2, (img.naturalHeight - s) / 2, s, s, 0, 0, size, size);
+      URL.revokeObjectURL(url);
+      c.toBlob(b => b ? resolve(b) : reject(new Error("Couldn't read that photo")), "image/jpeg", 0.82);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Couldn't read that photo")); };
+    img.src = url;
+  });
+}
+async function uploadPhoto(file) {
+  const blob = await squareJpeg(file);
+  const path = `items/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.jpg`;
+  const { error } = await sb.storage.from("product-photos").upload(path, blob, { contentType: "image/jpeg", upsert: false });
+  if (error) throw error;
+  return sb.storage.from("product-photos").getPublicUrl(path).data.publicUrl;
+}
 
 /* stock = server levels minus sales still waiting in the outbox */
 function stockAt(locId, sku) {
@@ -483,6 +508,8 @@ async function renderSell() {
   }
   const s = state.search.toLowerCase();
   const groups = sizeGroups(activeProducts().filter(p => !s || p.name.toLowerCase().includes(s) || (p.family || "").toLowerCase().includes(s)), t.stockLoc);
+  const cats = [...new Set(activeProducts().map(p => p.category || "Other"))].sort((a, b) => ((CAT_ORDER.indexOf(a) + 1) || 99) - ((CAT_ORDER.indexOf(b) + 1) || 99) || a.localeCompare(b));
+  const cat = state.sellCat && (state.sellCat === "all" || cats.includes(state.sellCat)) ? state.sellCat : "all";
   const n = cartLines().reduce((x, l) => x + l.qty, 0);
   document.body.classList.toggle("has-cart", n > 0);
   const pic = p => { const img = photo(p); return img ? `<img src="${img}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph ${catG(p.category)}',innerHTML:this.dataset.ico}))" data-ico="${esc(catSvg(p.category))}">` : `<div class="ph ${catG(p.category)}">${catSvg(p.category)}</div>`; };
@@ -516,7 +543,8 @@ async function renderSell() {
       ${t.market ? `<button class="btn danger" id="endMarket">End market</button>` : ""}
     </div>
     <input class="search" id="search" type="search" placeholder="Search pieces" value="${esc(state.search)}">
-    <div class="grid" id="grid">${groups.map(tileHtml).join("") || `<div class="empty">No pieces match.</div>`}</div>
+    <div class="ttabs sell-tabs">${[["all", "All"], ...cats.map(c => [c, CAT_PLURAL[c] || c])].map(([k, l]) => `<button type="button" data-cat="${esc(k)}" aria-pressed="${cat === k}">${esc(l)}</button>`).join("")}</div>
+    <div id="grid">${(cat === "all" ? cats : [cat]).map(c => { const gs = groups.filter(g => (g.items[0].p.category || "Other") === c); return gs.length ? (cat === "all" ? `<div class="cat-h">${catIco(c)}<span>${esc(CAT_PLURAL[c] || c)}</span><b>${gs.length}</b></div>` : "") + `<div class="grid sm">${gs.map(tileHtml).join("")}</div>` : ""; }).join("") || `<div class="empty">No pieces match.</div>`}</div>
     ${n ? `<div class="cartbar"><div><div class="small">${n} piece${n > 1 ? "s" : ""} in this sale · <button type="button" class="link" id="clearCart">Clear</button></div><div class="num" style="font-size:20px;font-weight:700">${RM(cartGross())}</div></div><button class="btn" id="review">Continue</button></div>` : ""}`;
   $("#sellAt").onchange = e => { state.sellAt = e.target.value; localSet("sellAt", e.target.value); state.cart = {}; state.openGroup = null; render(); };
   $("#search").oninput = e => { state.search = e.target.value; const pos = e.target.selectionStart; render(); const i = $("#search"); i.focus(); i.setSelectionRange(pos, pos); };
@@ -525,6 +553,7 @@ async function renderSell() {
     if (have >= left) toast("Stock here says none left. Added anyway — fix the count later in Stock.");
     state.cart[sku] = have + 1;
   };
+  view.querySelectorAll("[data-cat]").forEach(b => b.onclick = () => { state.sellCat = b.dataset.cat; localSet("sellCat", state.sellCat); state.openGroup = null; render(); });
   $("#grid").onclick = e => {
     const inc = e.target.closest("[data-inc]"), dec = e.target.closest("[data-dec]");
     if (inc) { add(inc.dataset.inc); return render(); }
@@ -1239,13 +1268,35 @@ function productForm(p) {
       <div class="two">${field("retail_price", "Original price (RM)", "number")}
         <label class="field"><span>Status</span><select name="status">${["Active", "Paused", "Replaced", "Discontinued"].map(s => `<option ${v.status === s ? "selected" : ""}>${s}</option>`).join("")}</select></label></div>
       ${p ? "" : `<label class="field"><span>Pieces made so far (goes into workshop stock)</span><input name="start_qty" type="number" min="0" step="1" inputmode="numeric" placeholder="0"></label>`}
-      ${field("photo", "Google Drive photo ID (optional)")}
+      <label class="field"><span>Photo (optional)</span></label>
+      <div class="photo-pick">
+        <div class="photo-box" id="photoBox">${photo(v) ? `<img src="${esc(photo(v))}" alt="">` : `<div class="ph ${catG(v.category)}">${catSvg(v.category)}</div>`}</div>
+        <div class="photo-btns">
+          <label class="btn">Take photo<input type="file" accept="image/*" capture="environment" id="camIn" hidden></label>
+          <label class="btn">Choose photo<input type="file" accept="image/*" id="picIn" hidden></label>
+          ${v.photo ? `<button type="button" class="link" id="noPhoto" style="color:var(--rust)">Remove photo</button>` : ""}
+        </div>
+      </div>
+      <input type="hidden" name="photo" id="photoVal" value="${esc(v.photo || "")}">
       ${field("notes", "Notes (optional)")}
       <p class="small muted" style="margin-top:-4px">Used at markets and online. Each shop's own price is set on that shop's page.</p>
       ${codes ? `<p class="small muted">Shops: ${codes}</p>` : ""}
       <button class="btn primary block">${p ? "Save item" : "Add item"}</button>
-    </form>`, root => root.querySelector("#f").onsubmit = async e => {
+    </form>`, root => {
+    let busy = false;
+    const pick = async inp => {
+      const file = inp.files && inp.files[0]; if (!file) return;
+      busy = true; root.querySelector("#photoBox").innerHTML = `<div class="skeleton" style="height:100%;margin:0"></div>`;
+      try { const url = await uploadPhoto(file); root.querySelector("#photoVal").value = url; root.querySelector("#photoBox").innerHTML = `<img src="${esc(url)}" alt="">`; toast("Photo added"); }
+      catch (err) { root.querySelector("#photoBox").innerHTML = ""; fail(err); }
+      busy = false; inp.value = "";
+    };
+    root.querySelector("#camIn").onchange = e => pick(e.target);
+    root.querySelector("#picIn").onchange = e => pick(e.target);
+    const np = root.querySelector("#noPhoto"); if (np) np.onclick = () => { root.querySelector("#photoVal").value = ""; root.querySelector("#photoBox").innerHTML = `<div class="ph ${catG(v.category)}">${catSvg(v.category)}</div>`; np.remove(); };
+    root.querySelector("#f").onsubmit = async e => {
       e.preventDefault();
+      if (busy) return toast("Wait for the photo to finish uploading");
       const f = Object.fromEntries(new FormData(e.target));
       const start = parseInt(f.start_qty, 10) || 0; delete f.start_qty;
       for (const k in f) if (typeof f[k] === "string") { f[k] = f[k].trim(); if (f[k] === "") f[k] = null; }
@@ -1260,7 +1311,8 @@ function productForm(p) {
         }
         await loadAll(); closeSheet(); toast(p ? "Item saved" : start ? `${f.name} added · ${start} in workshop` : `${f.name} added`); render();
       } catch (err) { fail(err); }
-    });
+    };
+  });
 }
 
 /* =========================================================
