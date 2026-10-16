@@ -47,24 +47,40 @@ function localGet(k, d) { try { const v = localStorage.getItem("apolaki:" + k); 
 function localSet(k, v) { try { localStorage.setItem("apolaki:" + k, JSON.stringify(v)); } catch {} }
 
 function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove("show"), 2600); }
-let sheetTimer;
+/* data entry opens as its own page (slides in from the right); Back returns to the previous page */
+let sheetTimer, pageStack = [];
+function showPage(entry) {
+  const body = $("#sheetBody");
+  body.innerHTML = entry.html;
+  $("#sheet .sheet-card").scrollTop = 0;
+  if (entry.bind) entry.bind(body);
+}
 function openSheet(html, bind) {
   clearTimeout(sheetTimer);
   const sh = $("#sheet");
-  $("#sheetBody").innerHTML = html;
-  if (sh.hidden) { sh.hidden = false; sh.getBoundingClientRect(); }
-  sh.classList.add("open"); $("#sheetBody").parentElement.scrollTop = 0;
-  document.body.classList.add("locked");
-  if (bind) bind($("#sheetBody"));
-  /* no auto-focus: on a phone it pops the keyboard and shifts the page */
+  const title = (html.match(/<h2[^>]*>([\s\S]*?)<\/h2>/) || [])[1] || "";
+  const entry = { html, bind, title };
+  const at = sh.hidden ? -1 : pageStack.findIndex(p => p.title === title);
+  if (at >= 0) pageStack.splice(at, pageStack.length - at, entry); /* same page refreshed, or back to an earlier one */
+  else pageStack.push(entry);
+  const fresh = sh.hidden;
+  if (fresh) { sh.hidden = false; sh.getBoundingClientRect(); }
+  else { const c = $("#sheet .sheet-card"); c.classList.remove("swap"); void c.offsetWidth; c.classList.add("swap"); }
+  sh.classList.add("open"); document.body.classList.add("locked");
+  showPage(entry);
 }
 function closeSheet() {
+  pageStack = [];
   const sh = $("#sheet"); sh.classList.remove("open"); document.body.classList.remove("locked");
   if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
-  clearTimeout(sheetTimer); sheetTimer = setTimeout(() => { sh.hidden = true; $("#sheetBody").innerHTML = ""; }, 320);
+  clearTimeout(sheetTimer); sheetTimer = setTimeout(() => { sh.hidden = true; $("#sheetBody").innerHTML = ""; }, 340);
 }
-$("#sheet").addEventListener("click", e => { if (e.target.id === "sheet") closeSheet(); });
-document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#sheet").hidden) closeSheet(); });
+function pageBack() {
+  if (pageStack.length > 1) { pageStack.pop(); const c = $("#sheet .sheet-card"); c.classList.remove("swap"); void c.offsetWidth; c.classList.add("swap-back"); setTimeout(() => c.classList.remove("swap-back"), 400); showPage(pageStack[pageStack.length - 1]); }
+  else closeSheet();
+}
+$("#sheetBack").addEventListener("click", pageBack);
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#sheet").hidden) pageBack(); });
 
 const prod = sku => state.products.find(p => p.sku === sku);
 const loc = id => state.locations.find(l => l.id === Number(id));
@@ -79,7 +95,16 @@ const shopPrice = (locId, sku) => { const c = state.codes.find(x => x.location_i
 const CAT_ORDER = ["Bracelet", "Earrings", "Ring", "Neck Piece"];
 const CAT_G = { Bracelet: "g-sky", Earrings: "g-sunset", Ring: "g-coral", "Neck Piece": "g-sea" };
 const catG = c => CAT_G[c] || ["g-mint", "g-dusk", "g-sea"][String(c || "").length % 3];
-const catIco = c => `<span class="cat-ico ${catG(c)}"><span>${esc(String(c || "?")[0])}</span></span>`;
+/* small jewellery icons for each category */
+const CAT_SVG = {
+  Bracelet: '<ellipse cx="12" cy="12" rx="8.5" ry="6"/><ellipse cx="12" cy="12" rx="5.5" ry="3.6"/>',
+  Earrings: '<path d="M12 2.8a2.6 2.6 0 0 1 2.6 2.6c0 1.6-2.6 2-2.6 4.2"/><path d="M12 9.6 8.4 15.4a3.6 3.6 0 1 0 7.2 0z"/>',
+  Ring: '<circle cx="12" cy="14.6" r="6"/><path d="M9.6 6.2 12 3.2l2.4 3-2.4 2.4z"/>',
+  "Neck Piece": '<path d="M4 3.5c0 6.5 3.6 10.5 8 10.5s8-4 8-10.5"/><path d="M12 14v1.6"/><path d="m12 15.6-2.2 3 2.2 2.4 2.2-2.4z"/>',
+  Other: '<path d="M6.5 4h11l3.5 5-9 11L3 9z"/><path d="M3 9h18M9 4l3 16 3-16"/>'
+};
+const catSvg = c => `<svg viewBox="0 0 24 24" class="jw">${CAT_SVG[c] || CAT_SVG.Other}</svg>`;
+const catIco = c => `<span class="cat-ico ${catG(c)}">${catSvg(c)}</span>`;
 function groupByCategory(ps) {
   const g = {}; ps.forEach(p => (g[p.category || "Other"] = g[p.category || "Other"] || []).push(p));
   return Object.entries(g).sort((a, b) => ((CAT_ORDER.indexOf(a[0]) + 1) || 99) - ((CAT_ORDER.indexOf(b[0]) + 1) || 99) || a[0].localeCompare(b[0]))
@@ -106,11 +131,14 @@ function fail(e) { console.error(e); toast(e.message ? "Couldn't save: " + e.mes
 const outbox = () => localGet("outbox", []);
 function setOutbox(v) { localSet("outbox", v); updateBadge(); }
 function updateBadge() {
-  const b = $("#syncBadge"), n = outbox().length;
-  if (!state.user) { b.hidden = true; return; }
+  const b = $("#syncBadge"), n = outbox().length, on = navigator.onLine;
+  /* only shows when there's something to know: sales waiting on the phone, or no internet */
+  if (!state.user || (!n && on)) { b.hidden = true; return; }
   b.hidden = false;
   b.classList.toggle("pending", n > 0);
-  b.textContent = n ? `${n} sale line${n > 1 ? "s" : ""} on phone` : (navigator.onLine ? "Synced" : "Offline");
+  b.title = n ? `${n} sale line${n > 1 ? "s" : ""} saved on this phone, waiting to send. Tap to send now.` : "No internet. You can keep selling; sales send when you're back online.";
+  b.innerHTML = (on ? '<svg viewBox="0 0 24 24"><path d="M7 18a4.5 4.5 0 0 1-.5-9 6 6 0 0 1 11.5 1.5A3.75 3.75 0 0 1 17.5 18"/><path d="M12 12v7M9 15l3-3 3 3"/></svg>'
+    : '<svg viewBox="0 0 24 24"><path d="M7 18a4.5 4.5 0 0 1-.5-9 6 6 0 0 1 11.5 1.5A3.75 3.75 0 0 1 17.5 18H7z"/><path d="M4 4l16 16"/></svg>') + (n ? `<b>${n}</b>` : "");
 }
 let syncing = false;
 async function sync() {
@@ -127,7 +155,7 @@ async function sync() {
   } catch (e) { console.warn("sync later", e); }
   syncing = false; updateBadge();
 }
-$("#syncBadge").addEventListener("click", sync);
+$("#syncBadge").addEventListener("click", () => { toast($("#syncBadge").title); sync(); });
 window.addEventListener("online", sync);
 window.addEventListener("offline", updateBadge);
 setInterval(sync, 20000);
@@ -158,7 +186,7 @@ function renderLogin(msg) {
   $("#tabs").hidden = true; $("#top").hidden = true;
   $("#view").innerHTML = `
   <div class="login">
-    <div class="mark"><svg viewBox="0 0 64 56" aria-hidden="true"><path d="M32 4 L60 52 H4 Z" fill="none" stroke="currentColor" stroke-width="6" stroke-linejoin="round"/><path d="M21 40 L32 24 L43 40" fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/></svg></div>
+    <div class="mark"><svg viewBox="0 0 512 512" aria-hidden="true"><rect width="512" height="512" rx="110" fill="#2F5D50"/><path d="M256 104 L408 384 H104 Z" fill="none" stroke="#E2C27A" stroke-width="34" stroke-linejoin="round"/><path d="M200 300 L256 214 L312 300" fill="none" stroke="#E2C27A" stroke-width="26" stroke-linejoin="round" stroke-linecap="round"/></svg></div>
     <h1>Welcome<br>back!</h1>
     <p class="muted">One piece, one sale, one market at a time.</p>
     ${msg ? `<p class="tag rust" style="margin-bottom:10px">${esc(msg)}</p>` : ""}
@@ -177,7 +205,7 @@ function renderLogin(msg) {
 }
 async function start(session) {
   state.user = session ? session.user : null;
-  if (!state.user) { updateBadge(); $("#avatar").hidden = true; return renderLogin(); }
+  if (!state.user) { updateBadge(); return renderLogin(); }
   if (navigator.onLine) {
     const { data, error } = await sb.from("allowed_users").select("email");
     if (!error && (!data || !data.length)) {
@@ -189,8 +217,6 @@ async function start(session) {
   }
   $("#tabs").hidden = false; $("#top").hidden = false;
   try { const { data: me } = await sb.from("allowed_users").select("display_name").eq("email", state.user.email).maybeSingle(); state.name = me && me.display_name ? me.display_name.split(" ")[0] : null; } catch {}
-  const av = $("#avatar"); av.hidden = false; av.textContent = (state.user.email || "?").slice(0, 2).toUpperCase();
-  av.onclick = () => openSheet(`<h2 style="margin-top:0">Account</h2><p class="muted">${esc(state.user.email)}</p><button class="btn danger block" id="so">Sign out</button>`, r => r.querySelector("#so").onclick = () => { closeSheet(); sb.auth.signOut(); });
   await loadAll(); updateBadge(); sync(); render();
 }
 sb.auth.onAuthStateChange((evt, session) => {
@@ -416,7 +442,7 @@ async function renderSell() {
     <div class="grid" id="grid">${items.map(({ p, left }) => {
       const inCart = state.cart[p.sku] || 0, img = photo(p);
       return `<button class="tile ${left - inCart <= 0 && !inCart ? "out" : ""} ${inCart ? "in-cart" : ""}" data-sku="${p.sku}" type="button">
-        ${img ? `<img src="${img}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph ${catG(p.category)}',textContent:'${initials(p.name)}'}))">` : `<div class="ph ${catG(p.category)}">${initials(p.name)}</div>`}
+        ${img ? `<img src="${img}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph ${catG(p.category)}',innerHTML:this.dataset.ico}))" data-ico="${esc(catSvg(p.category))}">` : `<div class="ph ${catG(p.category)}">${catSvg(p.category)}</div>`}
         ${inCart ? `<span class="count">${inCart}</span>` : ""}
         <div class="name">${esc(p.name)}</div>
         <div class="meta">${RM(p.retail_price)} · ${Math.max(0, left - inCart)} left</div></button>`;
@@ -1224,6 +1250,8 @@ function drawAccounts(sales, pays, exps) {
         return `<tr><th colspan="2" style="padding-top:14px">${esc(g)}</th></tr>${cats.sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr><td>${esc(k.split("|")[1])}</td><td class="r">${RM(v)}</td></tr>`).join("")}<tr><td class="muted">Total ${esc(g.toLowerCase())}</td><td class="r muted">${RM(sum)}</td></tr>`;
       }).join("")}
       <tr><td><strong>Net income</strong></td><td class="r"><strong style="${yearIn - yearOut < 0 ? "color:var(--rust)" : ""}">${RM(yearIn - yearOut)}</strong></td></tr></table></div>`;
+  view.insertAdjacentHTML("beforeend", `<h2>Account</h2><div class="card"><div class="small muted" style="margin-bottom:10px">Signed in as ${esc(state.user?.email || "")}</div><button class="btn danger block" id="signOut">Sign out</button></div>`);
+  $("#signOut").onclick = () => sb.auth.signOut();
   $("#mon").onchange = e => { state.accMonth = e.target.value; render(); };
   $("#addExp").onclick = () => expenseForm(null);
   view.querySelectorAll("[data-exp]").forEach(r => r.onclick = () => expenseForm(mExps.find(e => e.id === Number(r.dataset.exp))));

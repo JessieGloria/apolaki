@@ -15,12 +15,11 @@
 <body>
 <header class="top" id="top" hidden>
   <div class="brand">
-    <span class="mark"><svg viewBox="0 0 64 56" aria-hidden="true"><path d="M32 4 L60 52 H4 Z" fill="none" stroke="currentColor" stroke-width="6" stroke-linejoin="round"/><path d="M21 40 L32 24 L43 40" fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/></svg></span>
+    <span class="mark"><svg viewBox="0 0 512 512" aria-hidden="true"><rect width="512" height="512" rx="110" fill="#2F5D50"/><path d="M256 104 L408 384 H104 Z" fill="none" stroke="#E2C27A" stroke-width="34" stroke-linejoin="round"/><path d="M200 300 L256 214 L312 300" fill="none" stroke="#E2C27A" stroke-width="26" stroke-linejoin="round" stroke-linecap="round"/></svg></span>
     <span>Apolaki</span>
   </div>
   <div class="top-right">
-    <button id="syncBadge" class="sync" type="button" hidden></button>
-    <button id="avatar" class="avatar" type="button" aria-label="Account" hidden></button>
+    <button id="syncBadge" class="sync" type="button" aria-label="Sync sales" hidden></button>
   </div>
 </header>
 
@@ -34,7 +33,7 @@
   <button data-tab="accounts" type="button"><svg viewBox="0 0 24 24"><path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6"/></svg>Accounts</button>
 </nav>
 
-<div id="sheet" class="sheet" hidden><div class="sheet-card" role="dialog" aria-modal="true"><div id="sheetBody"></div></div></div>
+<div id="sheet" class="sheet" hidden><div class="sheet-card" role="dialog" aria-modal="true"><div class="page-bar"><button class="back" id="sheetBack" type="button"><svg viewBox="0 0 8 13"><path d="M6.5 1.5 1.5 6.5 6.5 11.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg> Back</button></div><div id="sheetBody"></div></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>

@@ -1,5 +1,5 @@
 /* Apolaki — airy travel-app style: pale sky background, serif headlines, soft teal, gradient cards */
-@import url("https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;800&family=Poppins:wght@400;500;600;700&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap");
 [hidden] { display: none !important; }
 :root {
   --bg: #f3f8fb; --panel: #fff; --border: #e6eef3; --text: #1f2d3a; --muted: #9aa8b4;
@@ -40,15 +40,14 @@ button { cursor: pointer; }
 .top { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; justify-content: space-between; gap: 12px;
   padding: calc(12px + env(safe-area-inset-top, 0px)) 24px 6px; background: linear-gradient(var(--bg) 75%, rgba(243,248,251,0)); }
 .brand { display: flex; align-items: center; gap: 9px; color: var(--accent-ink); }
-.brand .mark { width: 30px; height: 30px; border-radius: 10px; background: var(--g-sky); color: #fff; display: flex; align-items: center; justify-content: center; box-shadow: 0 6px 14px rgba(79,147,173,.3); }
-.brand svg { width: 15px; height: 13px; }
-.brand > span:last-child { font-family: "Playfair Display", Georgia, serif; font-weight: 800; font-size: 17px; color: var(--text); }
+.brand .mark { width: 32px; height: 32px; display: block; filter: drop-shadow(0 4px 8px rgba(47,93,80,.25)); }
+.brand .mark svg { width: 32px; height: 32px; display: block; }
+.brand > span:last-child { font-weight: 700; font-size: 17px; color: var(--text); }
 .top-right { display: flex; align-items: center; gap: 8px; }
-.sync { border: 0; background: var(--panel); border-radius: 20px; padding: 6px 12px; font-size: 11px; font-weight: 600; color: var(--muted); box-shadow: var(--shadow); }
-.sync::before { content: ""; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--sage); margin-right: 6px; vertical-align: middle; }
-.sync.pending { color: #b0603f; background: #fdeee6; }
-.sync.pending::before { background: var(--peach); }
-.avatar { width: 38px; height: 38px; border-radius: 50%; border: 3px solid #fff; background: var(--g-sunset); color: #fff; font-size: 12px; font-weight: 700; display: flex; align-items: center; justify-content: center; box-shadow: var(--shadow); }
+.sync { position: relative; width: 38px; height: 38px; border: 0; border-radius: 50%; background: var(--panel); color: var(--muted); box-shadow: var(--shadow); display: flex; align-items: center; justify-content: center; padding: 0; }
+.sync svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.sync.pending { color: #e07b3f; }
+.sync b { position: absolute; top: -3px; right: -3px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: #e07b3f; color: #fff; font-size: 10.5px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
 
 main { max-width: 640px; margin: 0 auto; padding: 6px 24px 24px; outline: none; min-height: 60vh; }
 main.slide-r { animation: slideFromRight .32s var(--ease); }
@@ -62,8 +61,8 @@ main.anim .mcol:nth-child(2) .pcard { animation-delay: .06s; } main.anim .mcol .
 main.anim .list.tight .row, main.anim .card .figure:not(.lead), main.anim .list.tight .empty, main.anim details.group .row { animation: none; }
 
 /* ---------- type ---------- */
-h1 { font-family: "Playfair Display", Georgia, serif; font-size: 34px; font-weight: 800; line-height: 1.15; margin: 4px 0 18px; letter-spacing: -.01em; }
-h1.big { font-size: 36px; margin-bottom: 20px; }
+h1 { font-size: 30px; font-weight: 700; line-height: 1.2; margin: 4px 0 18px; letter-spacing: -.01em; }
+h1.big { font-size: 30px; margin-bottom: 18px; }
 h2 { font-size: 15px; font-weight: 700; margin: 26px 2px 12px; }
 h3 { font-size: 15px; font-weight: 700; margin: 0 0 3px; }
 p { margin: 0 0 10px; }
@@ -231,13 +230,13 @@ main.anim .meter i { animation: slide .8s var(--ease) both; }
 .sheet .chips { flex-wrap: wrap; margin: 8px 0 12px; padding: 0; overflow: visible; }
 .chip { flex: none; min-height: 34px; padding: 0 15px; border-radius: 20px; border: 0; background: var(--panel); color: var(--muted); font-size: 12.5px; font-weight: 600; box-shadow: var(--shadow); transition: background .2s var(--ease), color .2s, transform .12s; }
 .chip[aria-pressed="true"] { background: var(--accent); color: #fff; }
-.sheet .chip { box-shadow: none; background: var(--input-bg); }
+.sheet .chip { background: var(--panel); }
 .sheet .chip[aria-pressed="true"] { background: var(--accent); }
 
 label.field { display: block; margin-bottom: 12px; }
 label.field span { display: block; font-size: 12px; color: var(--muted); margin: 0 2px 6px; font-weight: 500; }
 input, select, textarea { width: 100%; min-height: 46px; padding: 12px 14px; border-radius: 16px; border: 1px solid transparent; background: var(--panel); color: var(--text); font-size: 16px; outline: none; transition: border-color .15s, background .15s; box-shadow: var(--shadow); }
-.sheet input, .sheet select, .sheet textarea { background: var(--input-bg); box-shadow: none; }
+.sheet input, .sheet select, .sheet textarea { background: var(--panel); box-shadow: var(--shadow); }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); background: #fff; }
 input[type="checkbox"] { box-shadow: none; accent-color: var(--accent); width: auto; min-height: 0; }
 input::placeholder, textarea::placeholder { color: var(--muted); }
@@ -273,18 +272,20 @@ body.has-cart main { padding-bottom: 110px; }
 .tabs svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round; }
 .tabs button[aria-current="page"] { color: var(--accent-ink); background: var(--accent-bg); font-size: 12.5px; }
 
-/* ---------- centred pop-up with a picture header ---------- */
-.sheet { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(31,45,58,0); transition: background .3s var(--ease); }
-.sheet.open { background: rgba(31,45,58,.45); -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); }
-.sheet-card { position: relative; background: var(--panel); width: 100%; max-width: 440px; max-height: 86vh; overflow: auto; border-radius: 28px; padding: 0 20px 20px; opacity: 0; transform: translateY(24px) scale(.96); transition: transform .35s var(--ease), opacity .25s; box-shadow: 0 30px 60px rgba(31,45,58,.25); }
-.sheet.open .sheet-card { opacity: 1; transform: none; }
-.sheet-card::before { content: ""; display: block; height: 70px; margin: 0 -20px 16px; background:
-  radial-gradient(circle at 78% 62%, rgba(255,255,255,.55) 0 14px, transparent 15px),
-  radial-gradient(ellipse 70% 60% at 30% 120%, rgba(255,255,255,.22) 0 98%, transparent 100%),
-  var(--g-sky); }
-.sheet h2 { font-size: 19px; font-weight: 700; margin: 0 0 12px; }
-.sheet .row, .sheet .figure:not(.lead), .sheet .card { background: var(--input-bg); box-shadow: none; }
-.sheet .list.tight { background: var(--input-bg); box-shadow: none; }
+/* ---------- data entry opens as its own page ---------- */
+.sheet { position: fixed; inset: 0; z-index: 60; background: transparent; pointer-events: none; }
+.sheet.open { pointer-events: auto; }
+.sheet-card { position: absolute; inset: 0; background: var(--bg); overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+  padding: 0 24px calc(40px + env(safe-area-inset-bottom, 0px)); transform: translateX(100%); transition: transform .38s var(--ease); }
+.sheet.open .sheet-card { transform: none; box-shadow: -10px 0 30px rgba(31,45,58,.08); }
+.sheet-card > #sheetBody { max-width: 592px; margin: 0 auto; }
+.sheet-card.swap #sheetBody { animation: slideFromRight .3s var(--ease); }
+.sheet-card.swap-back #sheetBody { animation: slideFromLeft .3s var(--ease); }
+.page-bar { position: sticky; top: 0; z-index: 2; max-width: 592px; margin: 0 auto; padding: calc(12px + env(safe-area-inset-top, 0px)) 0 8px; background: linear-gradient(var(--bg) 75%, rgba(243,248,251,0)); }
+.page-bar .back { font-size: 14px; color: var(--text); padding: 6px 0; }
+.sheet h2 { font-size: 26px; font-weight: 700; line-height: 1.2; margin: 6px 0 18px; }
+.sheet .row, .sheet .figure:not(.lead), .sheet .card { background: var(--panel); box-shadow: var(--shadow); }
+.sheet .list.tight { background: var(--panel); box-shadow: var(--shadow); }
 .sheet .list.tight .row { background: transparent; }
 
 /* toast */
@@ -316,7 +317,11 @@ details.group .inner .row { box-shadow: none; border-radius: 0; border-top: 1px 
 details.group .inner .row:first-child { border-top: 0; }
 .cat-ico { width: 46px; height: 46px; border-radius: 15px; flex: none; position: relative; overflow: hidden; color: #fff; font-weight: 800; font-size: 15px; display: flex; align-items: flex-end; padding: 6px 8px; }
 .cat-ico::before { content: ""; position: absolute; left: -30%; right: -30%; bottom: -50%; height: 80%; border-radius: 50%; background: rgba(255,255,255,.2); }
-.cat-ico span { position: relative; }
+.cat-ico { align-items: center; justify-content: center; padding: 0; }
+.cat-ico .jw { position: relative; width: 24px; height: 24px; }
+.jw { fill: none; stroke: #fff; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.tile .ph { align-items: center; justify-content: center; padding: 0; }
+.tile .ph .jw { position: relative; width: 46%; height: 46%; stroke-width: 1.3; }
 
 .retailer-card { cursor: pointer; }
 .mini-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
@@ -326,9 +331,9 @@ details.group .inner .row:first-child { border-top: 0; }
 
 /* sign in */
 .login { max-width: 320px; margin: 10vh auto 0; text-align: left; }
-.login .mark { width: 58px; height: 58px; border-radius: 18px; background: var(--g-sky); color: #fff; display: flex; align-items: center; justify-content: center; margin: 0 0 22px; box-shadow: 0 12px 26px rgba(79,147,173,.3); }
-.login .mark svg { width: 26px; height: 24px; }
-.login h1 { font-size: 36px; margin: 0 0 8px; }
+.login .mark { width: 64px; height: 64px; margin: 0 0 22px; filter: drop-shadow(0 10px 18px rgba(47,93,80,.28)); }
+.login .mark svg { width: 64px; height: 64px; display: block; }
+.login h1 { font-size: 30px; margin: 0 0 8px; }
 .login p { font-size: 13px; margin-bottom: 22px; }
 .login input { margin-bottom: 10px; }
 .login label.field span { display: none; }
