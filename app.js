@@ -33,7 +33,7 @@ const COLORS = ["var(--blue)","var(--orange)","var(--purple)","var(--pink)","var
 /* ---------- helpers ---------- */
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const RM = n => "RM" + Number(n || 0).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const RM = n => { const v = Number(n || 0); return (v < -0.004 ? "−RM" : "RM") + Math.abs(v).toLocaleString("en-MY", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
 const round2 = n => Math.round((Number(n) + Number.EPSILON) * 100) / 100;
 const pad = n => String(n).padStart(2, "0");
 const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -124,6 +124,8 @@ function stockAt(locId, sku) {
 }
 const stockTotalAt = locId => state.products.reduce((t, p) => t + Math.max(0, stockAt(locId, p.sku)), 0);
 
+/* reads of sales and expenses skip soft-deleted entries; "deleting" only marks them, so they can be restored */
+const live = (table, cols) => sb.from(table).select(cols).is("deleted_at", null);
 async function q(promise) { const { data, error } = await promise; if (error) throw error; return data; }
 function fail(e) { console.error(e); toast(e.message ? "Couldn't save: " + e.message : "Something went wrong. Check your connection."); }
 
@@ -263,9 +265,9 @@ async function fetchBalance() {
   const [st] = await q(sb.from("app_settings").select("value").eq("key", "opening_balance"));
   const ob = st?.value || { amount: 0, date: "2026-01-01" };
   const [sales, pays, exps] = await Promise.all([
-    q(sb.from("sales").select("amount").neq("channel", "retailer").gte("sold_at", new Date(ob.date + "T00:00").toISOString())),
+    q(live("sales", "amount").neq("channel", "retailer").gte("sold_at", new Date(ob.date + "T00:00").toISOString())),
     q(sb.from("payouts").select("paid_amount,net_amount").eq("paid", true).gte("paid_on", ob.date)),
-    q(sb.from("expenses").select("amount").gte("spent_on", ob.date))
+    q(live("expenses", "amount").gte("spent_on", ob.date))
   ]);
   const moneyIn = round2(sales.reduce((t, x) => t + Number(x.amount), 0) + pays.reduce((t, p) => t + Number(p.paid_amount ?? p.net_amount), 0));
   const out = round2(exps.reduce((t, x) => t + Number(x.amount), 0));
@@ -284,11 +286,11 @@ async function fetchHomeData() {
   const now = new Date(), ys = new Date(now.getFullYear(), 0, 1), ye = new Date(now.getFullYear() + 1, 0, 1);
   const pm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
   const [sales, pays, exps, unpaid, recentSales, recentMoves, lastReports] = await Promise.all([
-    q(sb.from("sales").select("sold_at,amount,channel").neq("channel", "retailer").gte("sold_at", ys.toISOString()).lt("sold_at", ye.toISOString())),
+    q(live("sales", "sold_at,amount,channel").neq("channel", "retailer").gte("sold_at", ys.toISOString()).lt("sold_at", ye.toISOString())),
     q(sb.from("payouts").select("paid_on,paid_amount,net_amount").eq("paid", true).gte("paid_on", ymd(ys)).lt("paid_on", ymd(ye))),
-    q(sb.from("expenses").select("spent_on,amount,description,category").gte("spent_on", ymd(ys)).lt("spent_on", ymd(ye))),
+    q(live("expenses", "spent_on,amount,description,category").gte("spent_on", ymd(ys)).lt("spent_on", ymd(ye))),
     q(sb.from("payouts").select("*").eq("paid", false).order("period_month")),
-    q(sb.from("sales").select("sold_at,amount,qty,sku,channel,location_id,cart_id,report_id,description,client_id").order("sold_at", { ascending: false }).limit(60)),
+    q(live("sales", "sold_at,amount,qty,sku,channel,location_id,cart_id,report_id,description,client_id").order("sold_at", { ascending: false }).limit(60)),
     q(sb.from("stock_movements").select("moved_on,qty,sku,from_location,to_location,reason,ref,created_at").order("moved_on", { ascending: false }).order("created_at", { ascending: false }).limit(30)),
     q(sb.from("payouts").select("location_id").eq("period_month", ymd(pm)))
   ]);
@@ -534,7 +536,7 @@ async function todaySheet(t) {
   const start = new Date(); start.setHours(0, 0, 0, 0);
   let server = [];
   try {
-    let qy = sb.from("sales").select("*").eq("location_id", t.locationId).eq("channel", t.channel).gte("sold_at", start.toISOString()).order("sold_at", { ascending: false });
+    let qy = live("sales", "*").eq("location_id", t.locationId).eq("channel", t.channel).gte("sold_at", start.toISOString()).order("sold_at", { ascending: false });
     server = await q(qy);
   } catch {}
   const local = outbox().filter(r => r.location_id === t.locationId && r.channel === t.channel && new Date(r.sold_at) >= start);
@@ -556,7 +558,7 @@ async function todaySheet(t) {
       if (!confirm("Remove this sale? The pieces go back into stock.")) return;
       const k = b.dataset.cart;
       setOutbox(outbox().filter(r => (r.cart_id || r.client_id) !== k));
-      try { const rows = carts[k].rows.filter(r => r.id); if (rows.length) await q(sb.from("sales").delete().in("id", rows.map(r => r.id))); } catch (e) { return fail(e); }
+      try { const rows = carts[k].rows.filter(r => r.id); if (rows.length) await q(sb.from("sales").update({ deleted_at: new Date().toISOString() }).in("id", rows.map(r => r.id))); } catch (e) { return fail(e); }
       await loadStock(); toast("Sale removed"); todaySheet(t); render();
     });
   });
@@ -646,7 +648,7 @@ async function loadRetailerData(r) {
   const key = "rdata:" + r.id;
   try {
     const [sales, moves] = await Promise.all([
-      q(sb.from("sales").select("sale_month,sold_at,report_id,sku,qty,unit_price,amount,notes").eq("location_id", r.id).eq("channel", "retailer").order("sold_at")),
+      q(live("sales", "sale_month,sold_at,report_id,sku,qty,unit_price,amount,notes").eq("location_id", r.id).eq("channel", "retailer").order("sold_at")),
       q(sb.from("stock_movements").select("moved_on,sku,qty,from_location,to_location,reason,ref,notes,created_at").or(`to_location.eq.${r.id},from_location.eq.${r.id}`).order("moved_on"))
     ]);
     const d = { sales, moves }; localSet(key, d); return d;
@@ -918,8 +920,7 @@ function itemAtRetailerSheet(r, it) {
       try {
         const other = code && skuForCode(r.id, code);
         if (other && other !== p.sku) return toast(`${code} is already used for ${prod(other)?.name}`);
-        if (!code && price == null) await q(sb.from("retailer_codes").delete().eq("location_id", r.id).eq("sku", p.sku));
-        else await q(sb.from("retailer_codes").upsert({ location_id: r.id, sku: p.sku, code, price }, { onConflict: "location_id,sku" }));
+        await q(sb.from("retailer_codes").upsert({ location_id: r.id, sku: p.sku, code, price }, { onConflict: "location_id,sku" }));
         await loadAll(); closeSheet(); toast("Saved"); render();
       } catch (err) { fail(err); }
     };
@@ -961,7 +962,7 @@ function pasteSalesSheet(r) {
       const mon = root.querySelector("#mon").value, { lines, errors } = parseLines(root.querySelector("#txt").value, true, r);
       const reportId = `${r.code}-SALES-${mon}`;
       let existing = [];
-      try { existing = await q(sb.from("sales").select("id").eq("report_id", reportId)); } catch {}
+      try { existing = await q(live("sales", "id").eq("report_id", reportId)); } catch {}
       const total = round2(lines.reduce((t, l) => t + l.amount, 0)), pcs = lines.reduce((t, l) => t + l.qty, 0);
       const comm = round2(total * Number(r.commission_rate));
       root.querySelector("#out").innerHTML = `
@@ -977,7 +978,7 @@ function pasteSalesSheet(r) {
       s.onclick = async () => {
         const ms = monthStart(mon), last = new Date(ms.getFullYear(), ms.getMonth() + 1, 0, 12);
         try {
-          if (existing.length) await q(sb.from("sales").delete().eq("report_id", reportId));
+          if (existing.length) await q(sb.from("sales").update({ deleted_at: new Date().toISOString() }).eq("report_id", reportId));
           await q(sb.from("sales").insert(lines.map(l => ({ sold_at: last.toISOString(), sale_month: mon + "-01", channel: "retailer", location_id: r.id, report_id: reportId, sku: l.sku, qty: l.qty, unit_price: shopPrice(r.id, l.sku), amount: l.amount }))));
           await q(sb.from("payouts").upsert({ location_id: r.id, period_month: mon + "-01", sales_amount: total, commission: comm, net_amount: round2(total - comm) }, { onConflict: "location_id,period_month" }));
           await loadStock(); closeSheet(); toast(`${monthLabel(mon)} saved · ${pcs} pieces`); state.rTab = "sales"; state.rMonth = mon; afterRetailerSave();
@@ -1222,9 +1223,9 @@ async function renderAccounts() {
   let sales, pays, exps;
   try {
     [sales, pays, exps] = await Promise.all([
-      q(sb.from("sales").select("id,sold_at,amount,channel,location_id,payment_method,sku,qty,description,notes").neq("channel", "retailer").gte("sold_at", ys.toISOString()).lt("sold_at", ye.toISOString())),
+      q(live("sales", "id,sold_at,amount,channel,location_id,payment_method,sku,qty,description,notes").neq("channel", "retailer").gte("sold_at", ys.toISOString()).lt("sold_at", ye.toISOString())),
       q(sb.from("payouts").select("*").eq("paid", true).gte("paid_on", ymd(ys)).lt("paid_on", ymd(ye))),
-      q(sb.from("expenses").select("*").gte("spent_on", ymd(ys)).lt("spent_on", ymd(ye)).order("spent_on", { ascending: false }))
+      q(live("expenses", "*").gte("spent_on", ymd(ys)).lt("spent_on", ymd(ye)).order("spent_on", { ascending: false }))
     ]);
   } catch { if (!cached) view.innerHTML = `<h1 class="big">Money in<br>&amp; out</h1><div class="warn-banner">You're offline. Accounts need a connection.</div>`; return; }
   if (state.tab !== "accounts") return;
@@ -1357,7 +1358,7 @@ function incomeForm(x) {
     };
     const d = root.querySelector("#del"); if (d) d.onclick = async () => {
       if (!confirm("Delete this money-in entry?" + (x.sku ? " The pieces go back into stock." : ""))) return;
-      try { await q(sb.from("sales").delete().eq("id", x.id)); if (x.sku) await loadStock(); closeSheet(); toast("Entry deleted"); render(); } catch (err) { fail(err); }
+      try { await q(sb.from("sales").update({ deleted_at: new Date().toISOString() }).eq("id", x.id)); if (x.sku) await loadStock(); closeSheet(); toast("Entry deleted"); render(); } catch (err) { fail(err); }
     };
   });
 }
@@ -1384,7 +1385,7 @@ function expenseForm(x) {
     };
     const d = root.querySelector("#del"); if (d) d.onclick = async () => {
       if (!confirm("Delete this expense?")) return;
-      try { await q(sb.from("expenses").delete().eq("id", x.id)); closeSheet(); toast("Expense deleted"); render(); } catch (err) { fail(err); }
+      try { await q(sb.from("expenses").update({ deleted_at: new Date().toISOString() }).eq("id", x.id)); closeSheet(); toast("Expense deleted"); render(); } catch (err) { fail(err); }
     };
   });
 }
