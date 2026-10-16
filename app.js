@@ -1265,7 +1265,7 @@ function pasteSalesSheet(r) {
     <p class="small muted" style="margin:-4px 2px 12px">The end-of-month report covers the whole month, so it replaces the mid-month one.</p>
     ${sourcePicker(`Paste one line per item: ${esc(r.name)} code, quantity, amount`)}
     <div id="out"></div>`, root => {
-    let stage = def.stage;
+    let stage = def.stage, repTo = null;
     root.querySelectorAll("[data-stage]").forEach(b => b.onclick = () => { stage = b.dataset.stage; root.querySelectorAll("[data-stage]").forEach(x => x.setAttribute("aria-pressed", x === b)); });
     const draw = async () => {
       const mon = root.querySelector("#mon").value, reportId = `${r.code}-SALES-${mon}`;
@@ -1293,11 +1293,12 @@ function pasteSalesSheet(r) {
       });
       const s = root.querySelector("#save"); if (s) s.onclick = async () => {
         if (!ok.length) return toast("Nothing to save yet");
-        const ms = monthStart(mon), last = new Date(ms.getFullYear(), ms.getMonth() + 1, 0, 12);
+        const ms = monthStart(mon), mid = repTo && repTo.slice(0, 7) === mon ? new Date(repTo + "T12:00") : new Date(ms.getFullYear(), ms.getMonth(), 15, 12);
+        const last = stage === "mid" ? mid : new Date(ms.getFullYear(), ms.getMonth() + 1, 0, 12);
         try {
           if (existing.length) await q(sb.from("sales").update({ deleted_at: new Date().toISOString() }).eq("report_id", reportId).is("deleted_at", null));
           await q(sb.from("sales").insert(ok.map(l => ({ sold_at: last.toISOString(), sale_month: mon + "-01", channel: "retailer", location_id: r.id, report_id: reportId, sku: l.sku, qty: l.qty, unit_price: shopPrice(r.id, l.sku), amount: round2(l.amount || 0), notes: stage === "mid" ? "Mid-month report" : null }))));
-          await q(sb.from("payouts").upsert({ location_id: r.id, period_month: mon + "-01", sales_amount: total, commission: comm, net_amount: round2(total - comm), report_stage: stage, report_date: ymd(new Date()), due_on: dueDate(mon) }, { onConflict: "location_id,period_month" }));
+          await q(sb.from("payouts").upsert({ location_id: r.id, period_month: mon + "-01", sales_amount: total, commission: comm, net_amount: round2(total - comm), report_stage: stage, report_date: repTo && repTo.slice(0, 7) === mon ? repTo : ymd(new Date()), due_on: dueDate(mon) }, { onConflict: "location_id,period_month" }));
           await loadStock(); closeSheet(); toast(`${monthLabel(mon)} ${stage === "mid" ? "mid-month" : "final"} report saved · ${pcs} pieces`);
           state.rTab = "sales"; state.rMonth = mon; afterRetailerSave();
         } catch (e) { fail(e); }
@@ -1307,7 +1308,7 @@ function pasteSalesSheet(r) {
     bindSource(root, (ls, name) => {
       const got = readReport(ls, r, "sales"), m = got.meta;
       if (m.kind === "stock") { root.querySelector("#readStatus").textContent = ""; return toast("That's a stock report. Use Stock report on the shop page."); }
-      src = name; lines = got;
+      src = name; lines = got; repTo = m.to || null;
       if (m.mon) root.querySelector("#mon").value = m.mon;
       const st = m.kind === "history" ? "mid" : m.stage;
       if (st) { stage = st; root.querySelectorAll("[data-stage]").forEach(x => x.setAttribute("aria-pressed", x.dataset.stage === st)); }
@@ -1511,14 +1512,30 @@ function adjustSheet(p, at) {
   });
 }
 
+let itemsTab = "Active";
 function productsSheet() {
-  const list = state.products.slice().sort((a, b) => (a.status !== "Active") - (b.status !== "Active") || a.name.localeCompare(b.name));
+  const ORDER = ["Active", "Paused", "Replaced", "Discontinued"];
+  const groups = {}; state.products.forEach(p => (groups[p.status || "Active"] = groups[p.status || "Active"] || []).push(p));
+  const tabs = [...ORDER.filter(k => groups[k]), ...Object.keys(groups).filter(k => !ORDER.includes(k)).sort()];
+  if (!groups[itemsTab]) itemsTab = tabs[0] || "Active";
+  const row = p => `<div class="row" data-sku="${p.sku}" data-name="${esc(p.name.toLowerCase())}"><div class="grow"><div class="title" style="white-space:normal">${esc(p.name)}</div><div class="small muted">${esc(itemSub(p))}</div></div><span class="num">${RM(p.retail_price)}</span></div>`;
   openSheet(`
     <h2>All items</h2>
     <button class="btn primary block" id="new">+ New item</button>
-    <div class="list tight" style="margin-top:12px">${list.map(p => `<div class="row" data-sku="${p.sku}"><div class="grow"><div class="title">${esc(p.name)}</div><div class="small muted">${esc(itemSub(p))}${p.status !== "Active" ? ` · ${esc(p.status)}` : ""}</div></div><span class="num">${RM(p.retail_price)}</span></div>`).join("")}</div>`, root => {
+    <div class="ttabs" style="margin-top:16px">${tabs.map(k => `<button type="button" data-st="${esc(k)}" aria-pressed="${k === itemsTab}">${esc(k)} <span class="muted">${groups[k].length}</span></button>`).join("")}</div>
+    <input class="search" id="flt" type="search" placeholder="Search items">
+    <div class="list tight" id="itemList" style="margin-top:10px"></div>`, root => {
+    const draw = () => {
+      const s = root.querySelector("#flt").value.trim().toLowerCase();
+      const list = (s ? state.products : groups[itemsTab] || []).filter(p => !s || p.name.toLowerCase().includes(s) || String(p.sku).toLowerCase().includes(s))
+        .slice().sort((a, b) => a.name.localeCompare(b.name));
+      root.querySelector("#itemList").innerHTML = list.length ? list.map(p => s && p.status !== "Active" ? row(p).replace(`${esc(itemSub(p))}</div>`, `${esc(itemSub(p))} · ${esc(p.status)}</div>`) : row(p)).join("") : `<div class="small muted" style="padding:12px 2px">No items here.</div>`;
+      root.querySelectorAll("#itemList [data-sku]").forEach(r => r.onclick = () => productForm(prod(r.dataset.sku)));
+    };
+    root.querySelectorAll("[data-st]").forEach(b => b.onclick = () => { itemsTab = b.dataset.st; root.querySelectorAll("[data-st]").forEach(x => x.setAttribute("aria-pressed", x === b)); root.querySelector("#flt").value = ""; draw(); });
+    root.querySelector("#flt").oninput = draw;
     root.querySelector("#new").onclick = () => productForm(null);
-    root.querySelectorAll("[data-sku]").forEach(r => r.onclick = () => productForm(prod(r.dataset.sku)));
+    draw();
   });
 }
 function productForm(p) {
