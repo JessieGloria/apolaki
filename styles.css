@@ -347,3 +347,5 @@ details.group .inner .row:first-child { border-top: 0; }
 input[type="date"], input[type="month"], input[type="time"] { -webkit-appearance: none; appearance: none; display: block; min-width: 0; max-width: 100%; text-align: left; line-height: 1.2; }
 input[type="date"]::-webkit-date-and-time-value, input[type="month"]::-webkit-date-and-time-value { text-align: left; margin: 0; }
 label.field { min-width: 0; }
+.two-btn { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 4px; }
+.two-btn .btn.primary { padding: 14px 10px; font-size: 13px; }

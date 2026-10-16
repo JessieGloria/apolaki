@@ -265,7 +265,7 @@ async function fetchHomeData() {
     q(sb.from("payouts").select("paid_on,paid_amount,net_amount").eq("paid", true).gte("paid_on", ymd(ys)).lt("paid_on", ymd(ye))),
     q(sb.from("expenses").select("spent_on,amount,description,category").gte("spent_on", ymd(ys)).lt("spent_on", ymd(ye))),
     q(sb.from("payouts").select("*").eq("paid", false).order("period_month")),
-    q(sb.from("sales").select("sold_at,amount,qty,sku,channel,location_id,cart_id,report_id").order("sold_at", { ascending: false }).limit(60)),
+    q(sb.from("sales").select("sold_at,amount,qty,sku,channel,location_id,cart_id,report_id,description,client_id").order("sold_at", { ascending: false }).limit(60)),
     q(sb.from("stock_movements").select("moved_on,qty,sku,from_location,to_location,reason,ref,created_at").order("moved_on", { ascending: false }).order("created_at", { ascending: false }).limit(30)),
     q(sb.from("payouts").select("location_id").eq("period_month", ymd(pm)))
   ]);
@@ -292,6 +292,7 @@ function recentActivity(d) {
   const ev = [], carts = {};
   for (const s of d.recentSales || []) {
     if (s.report_id) { const k = "r" + s.report_id; (carts[k] = carts[k] || { at: s.sold_at, kind: "report", loc: s.location_id, rep: s.report_id, qty: 0, amt: 0 }); carts[k].qty += s.qty || 0; carts[k].amt += Number(s.amount); continue; }
+    if (s.channel === "other") { ev.push({ at: s.sold_at, chip: "Money in", title: s.description || prod(s.sku)?.name || "Sale", right: RM(s.amount) }); continue; }
     const k = "c" + (s.cart_id || s.sold_at);
     (carts[k] = carts[k] || { at: s.sold_at, kind: "sale", loc: s.location_id, ch: s.channel, qty: 0, amt: 0, items: [] });
     carts[k].qty += s.qty || 0; carts[k].amt += Number(s.amount); if (s.sku) carts[k].items.push(prod(s.sku)?.name || s.sku);
@@ -326,8 +327,8 @@ function drawHome(d, quiet) {
   const inPeriod = s => period === "year" || monthOf(s) === curM;
   const months = Array.from({ length: 12 }, (_, i) => ym(new Date(d.year, i, 1)));
   const inc = Object.fromEntries(months.map(m => [m, 0]));
-  const src = { Shops: 0, Markets: 0, Online: 0 };
-  d.sales.forEach(s => { inc[monthOf(s.sold_at)] += Number(s.amount); if (inPeriod(s.sold_at)) src[s.channel === "online" ? "Online" : "Markets"] += Number(s.amount); });
+  const src = { Shops: 0, Markets: 0, Online: 0, "Other sales": 0 };
+  d.sales.forEach(s => { inc[monthOf(s.sold_at)] += Number(s.amount); if (inPeriod(s.sold_at)) src[s.channel === "online" ? "Online" : s.channel === "other" ? "Other sales" : "Markets"] += Number(s.amount); });
   d.pays.forEach(p => { const a = Number(p.paid_amount ?? p.net_amount); inc[monthOf(p.paid_on)] += a; if (inPeriod(p.paid_on)) src.Shops += a; });
   outbox().forEach(r => { src[r.channel === "online" ? "Online" : "Markets"] += Number(r.amount); inc[curM] += Number(r.amount); });
   const moneyIn = Object.values(src).reduce((a, b) => a + b, 0);
@@ -338,7 +339,7 @@ function drawHome(d, quiet) {
   const pieces = stockTotalAt("all");
   const label = period === "year" ? String(d.year) : now.toLocaleDateString("en-MY", { month: "long" });
 
-  const srcColors = { Shops: "var(--mauve)", Markets: "var(--peach)", Online: "var(--sage)" };
+  const srcColors = { Shops: "var(--mauve)", Markets: "var(--peach)", Online: "var(--sage)", "Other sales": "var(--indigo)" };
   const C = 2 * Math.PI * 42; let off = 0;
   const parts = Object.values(src).filter(x => x > 0).length;
   const arcs = Object.entries(src).filter(([, v]) => v > 0).map(([k, v]) => {
@@ -1196,7 +1197,7 @@ async function renderAccounts() {
   let sales, pays, exps;
   try {
     [sales, pays, exps] = await Promise.all([
-      q(sb.from("sales").select("sold_at,amount,channel,location_id,payment_method").neq("channel", "retailer").gte("sold_at", ys.toISOString()).lt("sold_at", ye.toISOString())),
+      q(sb.from("sales").select("id,sold_at,amount,channel,location_id,payment_method,sku,qty,description,notes").neq("channel", "retailer").gte("sold_at", ys.toISOString()).lt("sold_at", ye.toISOString())),
       q(sb.from("payouts").select("*").eq("paid", true).gte("paid_on", ymd(ys)).lt("paid_on", ymd(ye))),
       q(sb.from("expenses").select("*").gte("spent_on", ymd(ys)).lt("spent_on", ymd(ye)).order("spent_on", { ascending: false }))
     ]);
@@ -1217,10 +1218,11 @@ function drawAccounts(sales, pays, exps) {
 
   const mSales = sales.filter(s => monthOf(s.sold_at) === mon), mPays = pays.filter(p => monthOf(p.paid_on) === mon), mExps = exps.filter(e => monthOf(e.spent_on) === mon);
   const grouped = {};
-  mSales.forEach(s => { const k = ymd(new Date(s.sold_at)) + "|" + s.location_id + "|" + s.channel; grouped[k] = (grouped[k] || 0) + Number(s.amount); });
+  mSales.filter(s => s.channel !== "other").forEach(s => { const k = ymd(new Date(s.sold_at)) + "|" + s.location_id + "|" + s.channel; grouped[k] = (grouped[k] || 0) + Number(s.amount); });
   const incomeRows = [
     ...mPays.map(p => ({ d: p.paid_on, t: `${loc(p.location_id)?.name} payout`, s: `${monthLabel(p.period_month.slice(0, 7))} sales`, a: Number(p.paid_amount ?? p.net_amount) })),
-    ...Object.entries(grouped).map(([k, a]) => { const [d, l, c] = k.split("|"); return { d, t: c === "online" ? "Online orders" : loc(l)?.name || "Market", s: c === "online" ? "Online" : "Market", a }; })
+    ...Object.entries(grouped).map(([k, a]) => { const [d, l, c] = k.split("|"); return { d, t: c === "online" ? "Online orders" : loc(l)?.name || "Market", s: c === "online" ? "Online" : "Market", a }; }),
+    ...mSales.filter(s => s.channel === "other").map(s => ({ d: ymd(new Date(s.sold_at)), id: s.id, t: s.description || (s.sku ? prod(s.sku)?.name : "") || "Sale", s: ["Other sale", s.payment_method, s.sku && s.qty ? `${s.qty} × ${prod(s.sku)?.name || ""}` : null].filter(Boolean).join(" · "), a: Number(s.amount) }))
   ].sort((a, b) => b.d.localeCompare(a.d));
 
   const yearIn = months.reduce((t, m) => t + inc[m], 0), yearOut = months.reduce((t, m) => t + out[m], 0);
@@ -1232,9 +1234,9 @@ function drawAccounts(sales, pays, exps) {
       <div class="figure lead"><div class="label">Left in ${monthStart(mon).toLocaleDateString("en-MY", { month: "long" })}</div><div class="value">${RM(inc[mon] - out[mon])}</div></div>
       <div class="figure"><div class="label">Money in</div><div class="value">${RM(inc[mon])}</div></div>
       <div class="figure"><div class="label">Spent</div><div class="value">${RM(out[mon])}</div></div></div>
-    <button class="btn primary block" id="addExp">Add an expense</button>
+    <div class="two-btn"><button class="btn primary" id="addInc">+ Add money in</button><button class="btn primary" id="addExp">+ Add an expense</button></div>
     <h2>Money in</h2>
-    <div class="list tight">${incomeRows.map(r => `<div class="row"><div class="grow"><div class="title">${esc(r.t)}</div><div class="small muted">${shortDate(r.d)} · ${esc(r.s)}</div></div><span class="num">${RM(r.a)}</span></div>`).join("") || `<div class="empty">Nothing received this month yet.</div>`}</div>
+    <div class="list tight">${incomeRows.map(r => `<div class="row"${r.id ? ` data-inc="${r.id}"` : ""}><div class="grow"><div class="title">${esc(r.t)}</div><div class="small muted">${shortDate(r.d)} · ${esc(r.s)}</div></div><span class="num">${RM(r.a)}</span></div>`).join("") || `<div class="empty">Nothing received this month yet.</div>`}</div>
     <h2>Spent</h2>
     <div class="list tight">${mExps.map(e => `<div class="row" data-exp="${e.id}"><div class="grow"><div class="title">${esc(e.description || e.category)}</div><div class="small muted">${shortDate(e.spent_on)} · ${esc(e.category)}${e.paid_to ? " · " + esc(e.paid_to) : ""}</div></div><span class="num">${RM(e.amount)}</span></div>`).join("") || `<div class="empty">No expenses this month.</div>`}</div>
     <h2>${ms.getFullYear()} by month</h2>
@@ -1254,7 +1256,64 @@ function drawAccounts(sales, pays, exps) {
   $("#signOut").onclick = () => sb.auth.signOut();
   $("#mon").onchange = e => { state.accMonth = e.target.value; render(); };
   $("#addExp").onclick = () => expenseForm(null);
+  $("#addInc").onclick = () => incomeForm(null);
+  view.querySelectorAll("[data-inc]").forEach(r => r.onclick = () => incomeForm(sales.find(x => x.id === Number(r.dataset.inc))));
   view.querySelectorAll("[data-exp]").forEach(r => r.onclick = () => expenseForm(mExps.find(e => e.id === Number(r.dataset.exp))));
+}
+
+/* money in from a sale entered by hand: not from a market, an online order or a shop report */
+function incomeForm(x) {
+  const v = x || { sold_at: new Date().toISOString(), payment_method: "Cash" };
+  const items = activeProducts().concat(x && x.sku && !activeProducts().some(p => p.sku === x.sku) ? [prod(x.sku)].filter(Boolean) : []).sort((a, b) => a.name.localeCompare(b.name));
+  const places = state.locations.filter(l => l.active || l.id === v.location_id);
+  openSheet(`
+    <h2>${x ? "Edit money in" : "Add money in"}</h2>
+    <form id="f">
+      <label class="field"><span>Date</span><input name="date" type="date" value="${ymd(new Date(v.sold_at))}" required></label>
+      <label class="field"><span>Amount received (RM)</span><input name="amount" type="number" step="0.01" min="0" inputmode="decimal" value="${v.amount ?? ""}" required></label>
+      <label class="field"><span>What was it</span><input name="description" value="${esc(v.description || "")}" placeholder="e.g. Custom ring for a friend"></label>
+      <label class="field"><span>Paid by</span><select name="payment_method">${PAYMENTS.map(p => `<option ${v.payment_method === p ? "selected" : ""}>${p}</option>`).join("")}</select></label>
+      <label class="field"><span>Item sold (optional, takes it off stock)</span><select name="sku" id="sku"><option value="">No item, money only</option>${items.map(p => `<option value="${p.sku}" ${v.sku === p.sku ? "selected" : ""}>${esc(p.name)}</option>`).join("")}</select></label>
+      <div id="itemBits" ${v.sku ? "" : "hidden"}>
+        <label class="field"><span>How many pieces</span><input name="qty" type="number" min="1" step="1" inputmode="numeric" value="${v.qty || 1}"></label>
+        <label class="field"><span>Taken from</span><select name="location_id">${places.map(l => `<option value="${l.id}" ${(v.location_id ?? workshop()?.id) === l.id ? "selected" : ""}>${esc(l.name)} · ${v.sku ? stockAt(l.id, v.sku) : ""}</option>`).join("")}</select></label>
+      </div>
+      <label class="field"><span>Note (optional)</span><input name="notes" value="${esc(v.notes || "")}" placeholder="e.g. Paid half, rest next week"></label>
+      <button class="btn primary block">${x ? "Save changes" : "Add money in"}</button>
+      ${x ? `<button class="btn danger block" type="button" id="del" style="margin-top:10px">Delete this entry</button>` : ""}
+    </form>`, root => {
+    const sel = root.querySelector("#sku"), bits = root.querySelector("#itemBits"), from = root.querySelector('[name="location_id"]');
+    const refresh = () => {
+      bits.hidden = !sel.value;
+      [...from.options].forEach(o => o.textContent = `${loc(o.value)?.name}${sel.value ? ` · ${stockAt(Number(o.value), sel.value)} in stock` : ""}`);
+      const amt = root.querySelector('[name="amount"]'), q = Number(root.querySelector('[name="qty"]').value) || 1;
+      /* suggest the price × pieces, but never overwrite an amount you typed yourself */
+      if (sel.value && (!amt.value || amt.dataset.auto === "1")) { amt.value = (q * Number(prod(sel.value)?.retail_price || 0)).toFixed(2); amt.dataset.auto = "1"; }
+    };
+    root.querySelector('[name="amount"]').oninput = e => { e.target.dataset.auto = ""; };
+    sel.onchange = refresh; root.querySelector('[name="qty"]').oninput = refresh;
+    refresh();
+    root.querySelector("#f").onsubmit = async e => {
+      e.preventDefault();
+      const f = Object.fromEntries(new FormData(e.target));
+      const amount = round2(Number(f.amount));
+      if (!(amount > 0)) return toast("Enter the amount received");
+      const sku = f.sku || null, qty = sku ? Math.max(1, parseInt(f.qty, 10) || 1) : null;
+      const row = { channel: "other", sold_at: new Date(f.date + "T12:00").toISOString(), sale_month: f.date.slice(0, 7) + "-01", amount,
+        description: f.description.trim() || null, payment_method: f.payment_method, notes: f.notes.trim() || null,
+        sku, qty, unit_price: sku ? Number(prod(sku)?.retail_price || 0) : null, location_id: sku ? Number(f.location_id) : null };
+      try {
+        if (x) await q(sb.from("sales").update(row).eq("id", x.id));
+        else await q(sb.from("sales").insert({ ...row, client_id: uuid() }));
+        if (sku || x?.sku) await loadStock();
+        closeSheet(); toast(x ? "Saved" : `Money in added · ${RM(amount)}`); render();
+      } catch (err) { fail(err); }
+    };
+    const d = root.querySelector("#del"); if (d) d.onclick = async () => {
+      if (!confirm("Delete this money-in entry?" + (x.sku ? " The pieces go back into stock." : ""))) return;
+      try { await q(sb.from("sales").delete().eq("id", x.id)); if (x.sku) await loadStock(); closeSheet(); toast("Entry deleted"); render(); } catch (err) { fail(err); }
+    };
+  });
 }
 
 function expenseForm(x) {
