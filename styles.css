@@ -235,14 +235,14 @@ main.anim .meter i { animation: slide .8s var(--ease) both; }
 
 label.field { display: block; margin-bottom: 12px; }
 label.field span { display: block; font-size: 12px; color: var(--muted); margin: 0 2px 6px; font-weight: 500; }
-input, select, textarea { width: 100%; min-height: 46px; padding: 12px 14px; border-radius: 16px; border: 1px solid transparent; background: var(--panel); color: var(--text); font-size: 16px; outline: none; transition: border-color .15s, background .15s; box-shadow: var(--shadow); }
+input, select, textarea { width: 100%; min-height: 44px; padding: 12px 14px; border-radius: 14px; border: 1px solid transparent; background: var(--panel); color: var(--text); font-size: 13.5px; outline: none; transition: border-color .15s, background .15s; box-shadow: var(--shadow); }
 .sheet input, .sheet select, .sheet textarea { background: var(--panel); box-shadow: var(--shadow); }
 input:focus, select:focus, textarea:focus { border-color: var(--accent); background: #fff; }
 input[type="checkbox"] { box-shadow: none; accent-color: var(--accent); width: auto; min-height: 0; }
 input::placeholder, textarea::placeholder { color: var(--muted); }
 select { appearance: none; -webkit-appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8'%3E%3Cpath d='M1 1.5 6 6.5 11 1.5' fill='none' stroke='%239aa8b4' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 14px center; background-size: 12px 8px; padding-right: 36px; }
-textarea { min-height: 140px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 14px; }
-.mini-in { min-height: 34px !important; padding: 6px 10px !important; width: 130px; font-size: 16px; }
+textarea { min-height: 140px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 13px; }
+.mini-in { min-height: 34px !important; padding: 6px 10px !important; width: 130px; font-size: 13px; }
 .two { display: grid; grid-template-columns: 1fr; gap: 0; }
 .search { margin: 0 0 16px; }
 
@@ -283,7 +283,7 @@ body.has-cart main { padding-bottom: 110px; }
 .sheet-card.swap-back #sheetBody { animation: slideFromLeft .3s var(--ease); }
 .page-bar { position: sticky; top: 0; z-index: 2; max-width: 592px; margin: 0 auto; padding: calc(12px + env(safe-area-inset-top, 0px)) 0 8px; background: linear-gradient(var(--bg) 75%, rgba(243,248,251,0)); }
 .page-bar .back { font-size: 14px; color: var(--text); padding: 6px 0; }
-.sheet h2 { font-size: 26px; font-weight: 700; line-height: 1.2; margin: 6px 0 18px; }
+.sheet h2 { font-size: 24px; font-weight: 700; line-height: 1.2; margin: 6px 0 18px; }
 .sheet .row, .sheet .figure:not(.lead), .sheet .card { background: var(--panel); box-shadow: var(--shadow); }
 .sheet .list.tight { background: var(--panel); box-shadow: var(--shadow); }
 .sheet .list.tight .row { background: transparent; }
@@ -342,3 +342,8 @@ details.group .inner .row:first-child { border-top: 0; }
 .skeleton { height: 120px; border-radius: 20px; background: linear-gradient(90deg, var(--border) 0, #f7fafc 80px, var(--border) 160px); background-size: 400px 100%; animation: shimmer 1.2s linear infinite; margin-bottom: 12px; }
 @keyframes shimmer { from { background-position: -200px 0; } to { background-position: 200px 0; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }
+
+/* iPhone date boxes: keep them inside the screen and left-aligned like the other boxes */
+input[type="date"], input[type="month"], input[type="time"] { -webkit-appearance: none; appearance: none; display: block; min-width: 0; max-width: 100%; text-align: left; line-height: 1.2; }
+input[type="date"]::-webkit-date-and-time-value, input[type="month"]::-webkit-date-and-time-value { text-align: left; margin: 0; }
+label.field { min-width: 0; }
