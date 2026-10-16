@@ -8,7 +8,7 @@ const state = {
   user: null, tab: "home",
   products: [], locations: [], stock: [],
   sellAt: localGet("sellAt", null), cart: {}, payment: "Cash", discount: 0,
-  stockLoc: "all", search: ""
+  stockLoc: "all", search: "", codes: []
 };
 
 const CATEGORIES = ["Raw Material","Packaging","Tools","Equipment","Postage","Office Supplies","Market Fee","Workshop Rent","Salary","Transport","Other"];
@@ -69,6 +69,12 @@ const loc = id => state.locations.find(l => l.id === Number(id));
 const workshop = () => state.locations.find(l => l.type === "workshop");
 const retailers = () => state.locations.filter(l => l.type === "retailer");
 const activeProducts = () => state.products.filter(p => p.status === "Active");
+/* retailer codes: each shop's own item code (Art Attic = APO numbers). Only shown on retailer pages. */
+const codeAt = (locId, sku) => state.codes.find(c => c.location_id === Number(locId) && c.sku === sku)?.code || null;
+const skuForCode = (locId, code) => state.codes.find(c => c.location_id === Number(locId) && c.code.toUpperCase() === String(code).toUpperCase())?.sku || null;
+const itemSub = p => [p.category, p.size && p.size !== "Free" ? p.size : null].filter(Boolean).join(" · ");
+const initials = name => String(name || "?").replace(/\(.*?\)/g, "").split(/\s+/).filter(w => /[A-Za-z]/.test(w)).slice(0, 2).map(w => w[0].toUpperCase()).join("");
+const newKey = () => "ITM" + String(Math.max(0, ...state.products.filter(x => /^ITM\d+$/.test(x.sku)).map(x => parseInt(x.sku.slice(3), 10))) + 1).padStart(4, "0");
 const photo = p => p && p.photo ? `https://drive.google.com/thumbnail?id=${encodeURIComponent(p.photo)}&sz=w300` : null;
 
 /* stock = server levels minus sales still waiting in the outbox */
@@ -116,15 +122,16 @@ setInterval(sync, 20000);
 /* ---------- data ---------- */
 async function loadAll() {
   try {
-    const [p, l] = await Promise.all([
-      q(sb.from("products").select("*").order("sku")),
-      q(sb.from("locations").select("*").order("id"))
+    const [p, l, c] = await Promise.all([
+      q(sb.from("products").select("*").order("name")),
+      q(sb.from("locations").select("*").order("id")),
+      q(sb.from("retailer_codes").select("location_id,sku,code"))
     ]);
-    state.products = p; state.locations = l;
-    localSet("products", p); localSet("locations", l);
+    state.products = p; state.locations = l; state.codes = c;
+    localSet("products", p); localSet("locations", l); localSet("codes", c);
     await loadStock();
   } catch (e) {
-    state.products = localGet("products", []); state.locations = localGet("locations", []); state.stock = localGet("stock", []);
+    state.products = localGet("products", []); state.locations = localGet("locations", []); state.stock = localGet("stock", []); state.codes = localGet("codes", []);
     toast("Offline. Showing the last saved copy.");
   }
 }
@@ -187,8 +194,8 @@ function go(tab) {
 document.querySelectorAll("#tabs button").forEach(b => b.onclick = () => go(b.dataset.tab));
 function render() {
   document.body.classList.remove("has-cart");
-  document.querySelectorAll("#tabs button").forEach(b => b.setAttribute("aria-current", b.dataset.tab === state.tab ? "page" : "false"));
-  ({ home: renderHome, market: renderSell, retailers: renderRetailers, stock: renderStock, accounts: renderAccounts })[state.tab]();
+  document.querySelectorAll("#tabs button").forEach(b => b.setAttribute("aria-current", b.dataset.tab === (state.tab === "retailer" ? "retailers" : state.tab) ? "page" : "false"));
+  ({ home: renderHome, market: renderSell, retailers: renderRetailers, retailer: renderRetailer, stock: renderStock, accounts: renderAccounts })[state.tab]();
 }
 
 /* =========================================================
@@ -368,8 +375,8 @@ async function renderSell() {
     return;
   }
   const s = state.search.toLowerCase();
-  const items = activeProducts().filter(p => !s || p.name.toLowerCase().includes(s) || p.sku.toLowerCase().includes(s))
-    .map(p => ({ p, left: stockAt(t.stockLoc, p.sku) })).sort((a, b) => (b.left > 0) - (a.left > 0) || a.p.sku.localeCompare(b.p.sku));
+  const items = activeProducts().filter(p => !s || p.name.toLowerCase().includes(s) || (p.family || "").toLowerCase().includes(s))
+    .map(p => ({ p, left: stockAt(t.stockLoc, p.sku) })).sort((a, b) => (b.left > 0) - (a.left > 0) || a.p.name.localeCompare(b.p.name));
   const n = cartLines().reduce((x, l) => x + l.qty, 0);
   document.body.classList.toggle("has-cart", n > 0);
   view.innerHTML = `<h1>Sell</h1>
@@ -384,7 +391,7 @@ async function renderSell() {
     <div class="grid" id="grid">${items.map(({ p, left }) => {
       const inCart = state.cart[p.sku] || 0, img = photo(p);
       return `<button class="tile ${left - inCart <= 0 && !inCart ? "out" : ""} ${inCart ? "in-cart" : ""}" data-sku="${p.sku}" type="button">
-        ${img ? `<img src="${img}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:'${p.sku}'}))">` : `<div class="ph">${p.sku}</div>`}
+        ${img ? `<img src="${img}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:'${initials(p.name)}'}))">` : `<div class="ph">${initials(p.name)}</div>`}
         ${inCart ? `<span class="count">${inCart}</span>` : ""}
         <div class="name">${esc(p.name)}</div>
         <div class="meta">${RM(p.retail_price)} · ${Math.max(0, left - inCart)} left</div></button>`;
@@ -524,34 +531,26 @@ function endMarketSheet(m) {
 async function renderRetailers() {
   const view = $("#view");
   let owed = localGet("owed", {});
-  const draw = () => { view.innerHTML = `<h1>Retailers</h1>
-    ${retailers().map(r => `<div class="card">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h3>${esc(r.name)}</h3><span class="tag">${esc(r.code || "")} · ${Math.round(Number(r.commission_rate) * 100)}%</span></div>
-      <div class="figures" style="margin:12px 0 6px">
+  const draw = () => {
+    view.innerHTML = `<h1>Retailers</h1>
+    ${retailers().map(r => `<div class="card retailer-card" data-open="${r.id}">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h3>${esc(r.name)}</h3><span style="display:flex;align-items:center;gap:8px"><span class="tag">${esc(r.code || "")} · ${Math.round(Number(r.commission_rate) * 100)}%</span>${CHEV}</span></div>
+      <div class="figures" style="margin:12px 0 0">
         <div class="figure"><div class="label">On their shelf</div><div class="value">${stockTotalAt(r.id)}</div></div>
         <div class="figure"><div class="label">Owed to you</div><div class="value" style="${owed[r.id] ? "color:var(--rust)" : ""}">${RM(owed[r.id] || 0)}</div></div>
-      </div>
-      <div class="btns">
-        <button class="btn" data-a="paste" data-id="${r.id}">Paste sales</button>
-        <button class="btn" data-a="tally" data-id="${r.id}">Tally stock</button>
-        <button class="btn" data-a="send" data-id="${r.id}">Send stock</button>
-        <button class="btn" data-a="pay" data-id="${r.id}">Payouts</button>
       </div></div>`).join("")}
     <button class="btn block" id="addR">Add a retailer</button>`;
-  view.querySelectorAll("[data-a]").forEach(b => b.onclick = () => {
-    const r = loc(b.dataset.id);
-    ({ paste: pasteSalesSheet, tally: tallySheet, pay: payoutsSheet, send: () => sendStockSheet(r) })[b.dataset.a](r);
-  });
-  $("#addR").onclick = () => openSheet(`
-    <h2 style="margin-top:0">Add a retailer</h2>
-    <form id="f"><label class="field"><span>Shop name</span><input name="name" required></label>
-    <div class="two"><label class="field"><span>Short code</span><input name="code" required maxlength="6" placeholder="TAA"></label>
-    <label class="field"><span>Commission %</span><input name="rate" type="number" step="0.1" min="0" max="100" value="35"></label></div>
-    <button class="btn primary block">Add retailer</button></form>`, root => root.querySelector("#f").onsubmit = async e => {
-      e.preventDefault(); const f = new FormData(e.target);
-      try { const [r] = await q(sb.from("locations").insert({ name: f.get("name").trim(), type: "retailer", code: f.get("code").trim().toUpperCase(), commission_rate: (Number(f.get("rate")) || 0) / 100 }).select());
-        state.locations.push(r); closeSheet(); toast("Retailer added"); render(); } catch (err) { fail(err); }
-    });
+    view.querySelectorAll("[data-open]").forEach(c => c.onclick = () => openRetailer(Number(c.dataset.open)));
+    $("#addR").onclick = () => openSheet(`
+      <h2>Add a retailer</h2>
+      <form id="f"><label class="field"><span>Shop name</span><input name="name" required></label>
+      <div class="two"><label class="field"><span>Short code</span><input name="code" required maxlength="6" placeholder="TAA"></label>
+      <label class="field"><span>Commission %</span><input name="rate" type="number" step="0.1" min="0" max="100" value="35"></label></div>
+      <button class="btn primary block">Add retailer</button></form>`, root => root.querySelector("#f").onsubmit = async e => {
+        e.preventDefault(); const f = new FormData(e.target);
+        try { const [r] = await q(sb.from("locations").insert({ name: f.get("name").trim(), type: "retailer", code: f.get("code").trim().toUpperCase(), commission_rate: (Number(f.get("rate")) || 0) / 100 }).select());
+          state.locations.push(r); closeSheet(); toast("Retailer added"); render(); } catch (err) { fail(err); }
+      });
   };
   draw();
   try {
@@ -561,46 +560,328 @@ async function renderRetailers() {
   } catch {}
 }
 
-/* reads lines like "APO055  2  154" or "APO055 TEXTURED EARRINGS 2 154.00" */
-function parseLines(text, wantAmount) {
+/* =========================================================
+   ONE RETAILER — laid out like the ART ATTIC sheet
+   ========================================================= */
+function openRetailer(id) { state.retailerId = id; state.rTab = state.rTab || "dash"; go("retailer"); }
+
+async function loadRetailerData(r) {
+  const key = "rdata:" + r.id, cached = localGet(key, null);
+  try {
+    const [sales, moves] = await Promise.all([
+      q(sb.from("sales").select("sale_month,sold_at,report_id,sku,qty,unit_price,amount,notes").eq("location_id", r.id).eq("channel", "retailer").order("sold_at")),
+      q(sb.from("stock_movements").select("moved_on,sku,qty,from_location,to_location,reason,ref,notes,created_at").or(`to_location.eq.${r.id},from_location.eq.${r.id}`).order("moved_on"))
+    ]);
+    const d = { sales, moves }; localSet(key, d); return d;
+  } catch (e) { if (cached) return cached; throw e; }
+}
+
+const MONTH = 30.4375 * 864e5;
+const fmtMonth = s => monthStart(s.slice(0, 7)).toLocaleDateString("en-MY", { month: "short", year: "numeric" });
+const pct = x => x == null || !isFinite(x) ? "—" : Math.round(x * 100) + "%";
+const dec = (x, n = 1) => x == null || !isFinite(x) ? "—" : Number(x).toFixed(n);
+
+/* per-item numbers, same idea as the sheet's Product Analysis (with the fixes you asked for) */
+function analyseRetailer(r, d) {
+  const rate = Number(r.commission_rate) || 0, today = new Date(), curM = ym(today);
+  const skus = new Set([...state.codes.filter(c => c.location_id === r.id).map(c => c.sku), ...d.sales.map(s => s.sku), ...d.moves.map(m => m.sku)].filter(Boolean));
+  const items = [];
+  for (const sku of skus) {
+    const p = prod(sku); if (!p) continue;
+    const ins = d.moves.filter(m => m.sku === sku && m.to_location === r.id && (m.reason === "restock" || m.reason === "transfer"));
+    const sl = d.sales.filter(s => s.sku === sku);
+    const stockIn = ins.reduce((t, m) => t + m.qty, 0);
+    const sold = sl.reduce((t, s) => t + (s.qty || 0), 0);
+    const actual = sl.reduce((t, s) => t + Number(s.amount), 0);
+    const gross = sold * Number(p.retail_price);
+    const current = stockAt(r.id, sku);
+    const first = ins.length ? ins[0].moved_on : null;
+    const monthsAvail = first ? Math.max(0, (today - new Date(first + "T00:00")) / MONTH) : 0;
+    const fullMonths = Math.max(1, Math.floor(monthsAvail));
+    const months = sl.map(s => (s.sale_month || s.sold_at).slice(0, 7)).sort();
+    const firstSale = months[0] || null, lastSale = months[months.length - 1] || null;
+    const sinceLast = lastSale ? (today.getFullYear() - +lastSale.slice(0, 4)) * 12 + today.getMonth() + 1 - +lastSale.slice(5, 7) : null;
+    const velocity = sold / fullMonths;
+    const cover = velocity > 0 ? current / velocity : null;
+    const st = sold + current > 0 ? sold / (sold + current) : null;
+    const restocks = new Set(ins.map(m => m.ref || m.moved_on)).size;
+    const stage = !first ? "Not stocked" : monthsAvail < 2 ? "Too New" : monthsAvail < 4 ? "New" : "Mature";
+    let role;
+    if (p.status !== "Active") role = "Non-Core";
+    else if (stage === "Too New") role = "Too New";
+    else if (velocity >= 2 && (st ?? 0) >= 0.6) role = "Core";
+    else if (velocity >= 1 || (st ?? 0) >= 0.5) role = "Promising";
+    else role = "Weak";
+    const movement = !sold ? "Never Sold" : sinceLast >= 3 ? "Dormant" : sinceLast <= 1 ? "Moving" : "Slowing";
+    const stockStatus = current <= 0 ? (sold ? "Sold Out" : "No Stock") : !sold ? "No Sales Yet" : cover < 1 ? "Low" : cover > 6 ? "Overstocked" : "Healthy";
+    let action;
+    if (p.status === "Replaced") action = current > 0 ? "Clear Remaining Stock" : "Use Replacement";
+    else if (p.status === "Paused") action = "Hold - Paused";
+    else if (p.status === "Discontinued") action = current > 0 ? "Clear Remaining Stock" : "Retired";
+    else if (stage === "Too New") action = "Monitor New Product";
+    else if (current <= 0 && sold > 0) action = "Priority Restock";
+    else if (cover != null && cover < 1) action = "Priority Restock";
+    else if (cover != null && cover < 2) action = "Restock Small Batch";
+    else if (monthsAvail >= 3 && (movement === "Dormant" || movement === "Never Sold")) action = "Review Design";
+    else if (role === "Weak") action = "Monitor Product";
+    else action = "Hold Restock";
+    items.push({ p, sku, code: codeAt(r.id, sku), stockIn, sold, actual, gross, net: actual * (1 - rate), current, value: current * Number(p.retail_price),
+      first, monthsAvail, firstSale, lastSale, sinceLast, velocity, cover, st, restocks, stage, role, movement, stockStatus, action,
+      realisation: gross ? actual / gross : null });
+  }
+  items.sort((a, b) => String(a.code || "~" + a.p.name).localeCompare(String(b.code || "~" + b.p.name)));
+  return items;
+}
+
+const ACTION_TONE = { "Priority Restock": "rust", "Restock Small Batch": "brass", "Clear Remaining Stock": "brass", "Review Design": "brass", "Use Replacement": "", "Hold - Paused": "", "Retired": "", "Monitor New Product": "green", "Monitor Product": "", "Hold Restock": "green" };
+const ROLE_TONE = { Core: "green", Promising: "brass", "Too New": "", Weak: "rust", "Non-Core": "" };
+const tag = (t, tone) => `<span class="tag ${tone || ""}">${esc(t)}</span>`;
+const codeChip = it => it.code ? `<span class="code">${esc(it.code)}</span>` : `<span class="code none">No code</span>`;
+
+async function renderRetailer() {
+  const view = $("#view"), r = loc(state.retailerId);
+  if (!r) return go("retailers");
+  const tabs = [["dash", "Dashboard"], ["stock", "Current stock"], ["in", "Stock in"], ["sales", "Monthly sales"], ["analysis", "Analysis"]];
+  const head = () => `
+    <button class="back" id="back">${'<svg viewBox="0 0 8 13"><path d="M6.5 1.5 1.5 6.5 6.5 11.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'} Retailers</button>
+    <div class="hero">
+      <div class="eyebrow">${esc((r.code || "").toUpperCase())} · ${Math.round(Number(r.commission_rate) * 100)}% COMMISSION</div>
+      <div class="big" style="font-size:24px;margin-bottom:10px">${esc(r.name)}</div>
+      <div class="hero-chips"><button class="hero-chip" data-a="paste">Paste sales</button><button class="hero-chip" data-a="send">Send stock</button><button class="hero-chip" data-a="tally">Tally stock</button><button class="hero-chip" data-a="pay">Payouts</button></div>
+    </div>
+    <div class="chips">${tabs.map(([k, l]) => `<button class="chip" data-rt="${k}" aria-pressed="${state.rTab === k}">${l}</button>`).join("")}</div>`;
+  const bindHead = () => {
+    $("#back").onclick = () => go("retailers");
+    view.querySelectorAll("[data-rt]").forEach(b => b.onclick = () => { state.rTab = b.dataset.rt; state.rFilter = null; renderRetailer(); });
+    view.querySelectorAll("[data-a]").forEach(b => b.onclick = () => ({ paste: pasteSalesSheet, tally: tallySheet, pay: payoutsSheet, send: sendStockSheet })[b.dataset.a](r));
+  };
+  const cached = localGet("rdata:" + r.id, null);
+  if (!cached) { view.innerHTML = head() + SKEL; bindHead(); }
+  let d;
+  try { d = await loadRetailerData(r); } catch { view.innerHTML = head() + `<div class="warn-banner">You're offline. Connect to see ${esc(r.name)}'s records.</div>`; bindHead(); return; }
+  if (state.tab !== "retailer" || state.retailerId !== r.id) return;
+  const items = analyseRetailer(r, d);
+  const body = { dash: rDashboard, stock: rStock, in: rStockIn, sales: rSales, analysis: rAnalysis }[state.rTab](r, d, items);
+  view.innerHTML = head() + body;
+  bindHead();
+  view.querySelectorAll("[data-item]").forEach(e => e.onclick = () => itemAtRetailerSheet(r, items.find(i => i.sku === e.dataset.item)));
+  view.querySelectorAll("[data-f]").forEach(b => b.onclick = () => { state.rFilter = b.dataset.f === "all" ? null : b.dataset.f; renderRetailer(); });
+  view.querySelectorAll("[data-mon]").forEach(b => b.onclick = () => { state.rMonth = b.dataset.mon; renderRetailer(); });
+}
+
+function rDashboard(r, d, items) {
+  const rate = Number(r.commission_rate) || 0;
+  const actual = items.reduce((t, i) => t + i.actual, 0), units = items.reduce((t, i) => t + i.sold, 0);
+  const stock = items.reduce((t, i) => t + Math.max(0, i.current), 0), value = items.reduce((t, i) => t + Math.max(0, i.value), 0);
+  const active = items.filter(i => i.p.status === "Active").length;
+  const year = new Date().getFullYear();
+  const byM = {};
+  d.sales.forEach(s => { const m = (s.sale_month || s.sold_at).slice(0, 7); const o = byM[m] = byM[m] || { u: 0, a: 0 }; o.u += s.qty || 0; o.a += Number(s.amount); });
+  const months = Array.from({ length: 12 }, (_, i) => `${year}-${pad(i + 1)}`);
+  const maxA = Math.max(1, ...months.map(m => byM[m]?.a || 0));
+  const counts = {}; items.forEach(i => counts[i.action] = (counts[i.action] || 0) + 1);
+  const order = ["Priority Restock", "Restock Small Batch", "Hold Restock", "Monitor New Product", "Monitor Product", "Review Design", "Clear Remaining Stock", "Hold - Paused", "Use Replacement", "Retired"];
+  const restock = items.filter(i => i.action === "Priority Restock" || i.action === "Restock Small Batch").sort((a, b) => (a.cover ?? 0) - (b.cover ?? 0));
+  const topU = items.filter(i => i.sold).sort((a, b) => b.sold - a.sold).slice(0, 10);
+  const topA = items.filter(i => i.actual).sort((a, b) => b.actual - a.actual).slice(0, 10);
+  const top5 = actual ? topA.slice(0, 5).reduce((t, i) => t + i.actual, 0) / actual : 0;
+  const cats = {}; items.forEach(i => { const k = i.p.category || "Other"; const c = cats[k] = cats[k] || { u: 0, a: 0, s: 0 }; c.u += i.sold; c.a += i.actual; c.s += Math.max(0, i.current); });
+  const good = items.filter(i => ["Core", "Promising", "Too New"].includes(i.role) && i.p.status === "Active");
+  const review = items.filter(i => ["Non-Core", "Weak"].includes(i.role) && (i.current > 0 || i.p.status === "Active"));
+  const nameCell = i => `<td>${codeChip(i)} ${esc(i.p.name)}</td>`;
+  return `
+    <div class="figures">
+      <div class="figure lead"><div class="label">Total actual sales</div><div class="value">${RM(actual)}</div></div>
+      <div class="figure"><div class="label">Net sales proceeds</div><div class="value">${RM(actual * (1 - rate))}</div></div>
+      <div class="figure"><div class="label">Total units sold</div><div class="value">${units}</div></div>
+      <div class="figure"><div class="label">Overall sell-through</div><div class="value">${pct(units + stock ? units / (units + stock) : null)}</div></div>
+      <div class="figure"><div class="label">Current stock</div><div class="value">${stock}</div></div>
+      <div class="figure"><div class="label">Current stock value</div><div class="value">${RM(value)}</div></div>
+      <div class="figure"><div class="label">Active items</div><div class="value">${active}</div></div>
+    </div>
+    <h2>Monthly performance ${year}</h2>
+    <div class="card compact">
+      <div class="bars" style="height:120px;margin:0 0 6px">${months.map(m => `<div class="bar ${m === ym(new Date()) ? "now" : ""}"><i style="height:${Math.max(3, (byM[m]?.a || 0) / maxA * 100)}%"></i><span>${monthStart(m).toLocaleDateString("en-MY", { month: "narrow" })}</span></div>`).join("")}</div>
+      <div class="scroll-x"><table class="simple"><tr><th>Month</th><th class="r">Units</th><th class="r">Actual</th><th class="r">Net</th><th class="r">Avg</th></tr>
+      ${months.filter(m => byM[m]).map(m => { const o = byM[m]; return `<tr><td>${monthStart(m).toLocaleDateString("en-MY", { month: "short" })}</td><td class="r">${o.u}</td><td class="r">${RM(o.a)}</td><td class="r">${RM(o.a * (1 - rate))}</td><td class="r">${o.u ? "RM" + Math.round(o.a / o.u) : "—"}</td></tr>`; }).join("") || `<tr><td colspan="5" class="muted">No sales this year yet.</td></tr>`}</table></div>
+    </div>
+    <h2>Action table</h2>
+    <div class="card"><table class="simple">${order.filter(a => counts[a]).map(a => `<tr><td>${tag(a, ACTION_TONE[a])}</td><td class="r"><strong>${counts[a]}</strong></td></tr>`).join("")}</table></div>
+    ${restock.length ? `<h2>Priority restock</h2>
+    <div class="card scroll-x"><table class="simple"><tr><th>Item</th><th class="r">Stock</th><th class="r">Sold/mo</th><th class="r">Cover</th></tr>
+      ${restock.map(i => `<tr data-item="${i.sku}">${nameCell(i)}<td class="r">${i.current}</td><td class="r">${dec(i.velocity)}</td><td class="r">${i.cover == null ? "—" : dec(i.cover) + " mo"}</td></tr>`).join("")}</table></div>` : ""}
+    <h2>Top 10 · units sold</h2>
+    <div class="card scroll-x"><table class="simple"><tr><th>Item</th><th class="r">Units</th><th class="r">Sold/mo</th><th class="r">Sell-through</th></tr>
+      ${topU.map(i => `<tr data-item="${i.sku}">${nameCell(i)}<td class="r">${i.sold}</td><td class="r">${dec(i.velocity)}</td><td class="r">${pct(i.st)}</td></tr>`).join("")}</table></div>
+    <h2>Top 10 · actual sales</h2>
+    <div class="card scroll-x"><table class="simple"><tr><th>Item</th><th class="r">Units</th><th class="r">Actual</th><th class="r">Realised</th></tr>
+      ${topA.map(i => `<tr data-item="${i.sku}">${nameCell(i)}<td class="r">${i.sold}</td><td class="r">${RM(i.actual)}</td><td class="r">${pct(i.realisation)}</td></tr>`).join("")}
+      <tr><td class="muted">Top 5 share of sales</td><td></td><td></td><td class="r"><strong>${pct(top5)}</strong></td></tr></table></div>
+    <h2>Category performance</h2>
+    <div class="card scroll-x"><table class="simple"><tr><th>Category</th><th class="r">Units</th><th class="r">Actual</th><th class="r">Net</th><th class="r">Stock</th><th class="r">Sell-through</th></tr>
+      ${Object.entries(cats).sort((a, b) => b[1].a - a[1].a).map(([k, c]) => `<tr><td>${esc(k)}</td><td class="r">${c.u}</td><td class="r">${RM(c.a)}</td><td class="r">${RM(c.a * (1 - rate))}</td><td class="r">${c.s}</td><td class="r">${pct(c.u + c.s ? c.u / (c.u + c.s) : null)}</td></tr>`).join("")}</table></div>
+    <h2>Good potential</h2>
+    <div class="list tight">${good.map(i => `<div class="row" data-item="${i.sku}"><div class="grow"><div class="title">${esc(i.p.name)}</div><div class="small muted">${codeChip(i)}</div></div>${tag(i.role, ROLE_TONE[i.role])}</div>`).join("") || `<div class="empty">Nothing yet.</div>`}</div>
+    <h2>Stop / review</h2>
+    <div class="list tight">${review.map(i => `<div class="row" data-item="${i.sku}"><div class="grow"><div class="title">${esc(i.p.name)}</div><div class="small muted">${codeChip(i)} ${esc(i.role)}</div></div>${tag(i.action, ACTION_TONE[i.action])}</div>`).join("") || `<div class="empty">Nothing to review.</div>`}</div>`;
+}
+
+function rStock(r, d, items) {
+  const f = state.rFilter || "in";
+  const list = items.filter(i => f === "all" ? true : f === "in" ? i.current > 0 : f === "nocode" ? !i.code : i.current <= 0);
+  const total = items.reduce((t, i) => t + Math.max(0, i.current), 0), value = items.reduce((t, i) => t + Math.max(0, i.value), 0);
+  const noCode = items.filter(i => !i.code && i.current > 0).length;
+  return `
+    <div class="figures"><div class="figure"><div class="label">Pieces on shelf</div><div class="value">${total}</div></div><div class="figure"><div class="label">Stock value</div><div class="value">${RM(value)}</div></div></div>
+    ${noCode ? `<div class="warn-banner">${noCode} item${noCode > 1 ? "s" : ""} on the shelf still need${noCode > 1 ? "" : "s"} a ${esc(r.name)} code. Tap to add it.</div>` : ""}
+    <div class="chips" style="margin-top:0">${[["in", "In stock"], ["out", "Sold out"], ["nocode", "No code"], ["all", "All"]].map(([k, l]) => `<button class="chip" data-f="${k}" aria-pressed="${f === k}">${l}</button>`).join("")}</div>
+    <div class="list tight">${list.map(i => `<div class="row" data-item="${i.sku}"><div class="grow"><div class="title">${esc(i.p.name)}</div>
+      <div class="small muted">${codeChip(i)} In ${i.stockIn} · Sold ${i.sold} · ${RM(i.p.retail_price)}${i.current > 0 ? ` · Value ${RM(i.value)}` : ""}</div>
+      <div style="margin-top:5px">${tag(i.action, ACTION_TONE[i.action])}</div></div>
+      <span class="num" style="font-size:20px;font-weight:700;${i.current <= 0 ? "color:var(--rust)" : ""}">${i.current}</span></div>`).join("") || `<div class="empty">Nothing here.</div>`}</div>`;
+}
+
+function rStockIn(r, d) {
+  const groups = {};
+  d.moves.filter(m => m.to_location === r.id || m.from_location === r.id).forEach(m => {
+    const k = m.moved_on + "|" + (m.ref || "") + "|" + m.reason + "|" + (m.to_location === r.id ? "in" : "out");
+    (groups[k] = groups[k] || { date: m.moved_on, ref: m.ref, reason: m.reason, dir: m.to_location === r.id ? "in" : "out", rows: [] }).rows.push(m);
+  });
+  const label = g => g.dir === "in" ? (g.reason === "correction" ? "Count fixed (+)" : "Stock in") : g.reason === "return" ? "Returned to workshop" : g.reason === "loss" ? "Lost / damaged" : "Count fixed (−)";
+  const list = Object.values(groups).sort((a, b) => b.date.localeCompare(a.date));
+  const totalIn = d.moves.filter(m => m.to_location === r.id && (m.reason === "restock" || m.reason === "transfer")).reduce((t, m) => t + m.qty, 0);
+  return `
+    <div class="figures"><div class="figure"><div class="label">Total stock in</div><div class="value">${totalIn}</div></div><div class="figure"><div class="label">Deliveries</div><div class="value">${list.filter(g => g.dir === "in" && g.reason !== "correction").length}</div></div></div>
+    <button class="btn primary block" data-a="send" style="margin-bottom:12px">+ Record a delivery</button>
+    <div class="tl">${list.map(g => `<div class="tl-item"><span class="tl-dot" style="${g.dir === "out" ? "background:var(--coral)" : ""}"></span><div class="tl-card">
+      <div class="tl-meta"><span class="tl-chip">${esc(g.ref || label(g))}</span><span>${shortDate(g.date)} ${new Date(g.date).getFullYear() !== new Date().getFullYear() ? new Date(g.date).getFullYear() : ""}</span></div>
+      <div class="small muted" style="margin-bottom:6px">${label(g)} · ${g.rows.reduce((t, m) => t + m.qty, 0)} pieces</div>
+      <table class="simple">${g.rows.map(m => `<tr data-item="${m.sku}"><td>${codeChip({ code: codeAt(r.id, m.sku) })} ${esc(prod(m.sku)?.name || m.sku)}</td><td class="r"><strong>${g.dir === "in" ? "" : "−"}${m.qty}</strong></td></tr>`).join("")}</table>
+    </div></div>`).join("") || `<div class="empty">No deliveries yet.</div>`}</div>`;
+}
+
+function rSales(r, d) {
+  const rate = Number(r.commission_rate) || 0;
+  const months = [...new Set(d.sales.map(s => (s.sale_month || s.sold_at).slice(0, 7)))].sort().reverse();
+  const mon = months.includes(state.rMonth) ? state.rMonth : months[0];
+  if (!mon) return `<div class="empty">No sales reports yet. Use “Paste sales” above.</div>`;
+  const lines = d.sales.filter(s => (s.sale_month || s.sold_at).slice(0, 7) === mon);
+  const agg = {}; lines.forEach(s => { const o = agg[s.sku] = agg[s.sku] || { sku: s.sku, qty: 0, amt: 0, notes: [] }; o.qty += s.qty || 0; o.amt += Number(s.amount); if (s.notes) o.notes.push(s.notes); });
+  const rows = Object.values(agg).map(o => { const p = prod(o.sku); const gross = o.qty * Number(p?.retail_price || 0); return { ...o, p, gross, comm: o.amt * rate, net: o.amt * (1 - rate), asp: o.qty ? o.amt / o.qty : 0, disc: gross ? 1 - o.amt / gross : 0 }; })
+    .sort((a, b) => b.amt - a.amt);
+  const T = k => rows.reduce((t, x) => t + x[k], 0);
+  return `
+    <div class="chips" style="margin-top:0">${months.map(m => `<button class="chip" data-mon="${m}" aria-pressed="${m === mon}">${fmtMonth(m)}</button>`).join("")}</div>
+    <div class="figures">
+      <div class="figure lead"><div class="label">${fmtMonth(mon)} · ${T("qty")} pieces · ${esc(lines[0]?.report_id || "")}</div><div class="value">${RM(T("amt"))}</div></div>
+      <div class="figure"><div class="label">Gross (retail price)</div><div class="value">${RM(T("gross"))}</div></div>
+      <div class="figure"><div class="label">Commission ${Math.round(rate * 100)}%</div><div class="value">−${RM(T("comm"))}</div></div>
+      <div class="figure"><div class="label">Net proceeds</div><div class="value">${RM(T("net"))}</div></div>
+      <div class="figure"><div class="label">Avg selling price</div><div class="value">${T("qty") ? RM(T("amt") / T("qty")) : "—"}</div></div>
+    </div>
+    <div class="list tight">${rows.map(x => `<div class="row" data-item="${x.sku}"><div class="grow"><div class="title">${esc(x.p?.name || x.sku)}</div>
+      <div class="small muted">${codeChip({ code: codeAt(r.id, x.sku) })} ${x.qty} × ${RM(x.p?.retail_price)}${x.disc > 0.005 ? ` · <span style="color:var(--rust)">${pct(x.disc)} off</span>` : ""} · net ${RM(x.net)}</div></div>
+      <span class="value">${RM(x.amt)}</span></div>`).join("")}</div>`;
+}
+
+function rAnalysis(r, d, items) {
+  const f = state.rFilter;
+  const roles = ["Core", "Promising", "Too New", "Weak", "Non-Core"];
+  const list = items.filter(i => !f || i.role === f).sort((a, b) => roles.indexOf(a.role) - roles.indexOf(b.role) || b.sold - a.sold);
+  return `
+    <p class="small muted" style="margin:0 2px 10px">Sold/mo = units sold ÷ full months on the shelf (at least 1), so new items aren't inflated. Cover = months of stock left at that pace.</p>
+    <div class="chips" style="margin-top:0"><button class="chip" data-f="all" aria-pressed="${!f}">All · ${items.length}</button>${roles.map(k => { const n = items.filter(i => i.role === k).length; return n ? `<button class="chip" data-f="${k}" aria-pressed="${f === k}">${k} · ${n}</button>` : ""; }).join("")}</div>
+    <div class="list">${list.map(i => `<div class="row" data-item="${i.sku}" style="display:block">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start"><div class="title" style="white-space:normal">${esc(i.p.name)}</div>${tag(i.role, ROLE_TONE[i.role])}</div>
+      <div class="small muted" style="margin:3px 0 8px">${codeChip(i)} ${esc(i.p.family || "")} · ${i.stage}${i.first ? ` · on shelf ${dec(i.monthsAvail)} mo` : ""}</div>
+      <div class="mini-grid">
+        <div><span>Sold</span><b>${i.sold}</b></div><div><span>Stock</span><b>${i.current}</b></div><div><span>Sold/mo</span><b>${dec(i.velocity)}</b></div>
+        <div><span>Cover</span><b>${i.cover == null ? "—" : dec(i.cover)}</b></div><div><span>Sell-through</span><b>${pct(i.st)}</b></div><div><span>Last sale</span><b>${i.lastSale ? monthStart(i.lastSale).toLocaleDateString("en-MY", { month: "short", year: "2-digit" }) : "—"}</b></div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${tag(i.action, ACTION_TONE[i.action])}${tag(i.movement)}${tag(i.stockStatus)}</div>
+    </div>`).join("")}</div>`;
+}
+
+/* tap an item on a retailer page: its numbers + set the shop's code */
+function itemAtRetailerSheet(r, it) {
+  if (!it) return;
+  const p = it.p;
+  openSheet(`
+    <h2>${esc(p.name)}</h2>
+    <p class="small muted">${esc(itemSub(p))} · ${RM(p.retail_price)} · ${esc(p.status)}</p>
+    <form id="cf" style="display:flex;gap:8px;align-items:flex-end;margin-bottom:12px">
+      <label class="field" style="flex:1;margin:0"><span>${esc(r.name)} code</span><input id="code" value="${esc(it.code || "")}" placeholder="e.g. APO091" autocapitalize="characters"></label>
+      <button class="btn" style="min-height:46px">Save code</button></form>
+    <div class="figures">
+      <div class="figure"><div class="label">On shelf</div><div class="value">${it.current}</div></div>
+      <div class="figure"><div class="label">Sold</div><div class="value">${it.sold}</div></div>
+      <div class="figure"><div class="label">Stock in</div><div class="value">${it.stockIn}</div></div>
+      <div class="figure"><div class="label">Actual sales</div><div class="value">${RM(it.actual)}</div></div>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">${tag(it.role, ROLE_TONE[it.role])}${tag(it.action, ACTION_TONE[it.action])}${tag(it.stockStatus)}</div>
+    <div class="btns"><button class="btn" id="adj">Fix count</button><button class="btn" id="edit">Edit item</button></div>`, root => {
+    root.querySelector("#cf").onsubmit = async e => {
+      e.preventDefault();
+      const code = root.querySelector("#code").value.trim().toUpperCase();
+      try {
+        if (!code) await q(sb.from("retailer_codes").delete().eq("location_id", r.id).eq("sku", p.sku));
+        else {
+          const other = skuForCode(r.id, code);
+          if (other && other !== p.sku) return toast(`${code} is already used for ${prod(other)?.name}`);
+          await q(sb.from("retailer_codes").upsert({ location_id: r.id, sku: p.sku, code }, { onConflict: "location_id,sku" }));
+        }
+        await loadAll(); closeSheet(); toast(code ? `Code ${code} saved` : "Code removed"); render();
+      } catch (err) { fail(err); }
+    };
+    root.querySelector("#adj").onclick = () => adjustSheet(p, r.id);
+    root.querySelector("#edit").onclick = () => productForm(p);
+  });
+}
+
+/* reads lines like "APO055  2  154" or "APO055 TEXTURED EARRINGS 2 154.00" using this shop's codes */
+function parseLines(text, wantAmount, r) {
   const out = {}, errors = [];
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim(); if (!line) continue;
-    const m = line.match(/\b([A-Z]{2,5}\d{3})\b/i); if (!m) continue;
-    const sku = m[1].toUpperCase();
-    const nums = (line.slice(m.index + m[0].length).match(/-?\d[\d,]*(\.\d+)?/g) || []).map(s => Number(s.replace(/,/g, "")));
-    if (!prod(sku)) { errors.push(`${sku} isn't in your product list`); continue; }
-    if (!nums.length) { errors.push(`${sku}: no quantity found`); continue; }
+    const tokens = line.split(/[\s,;]+/);
+    let code = null, idx = -1;
+    for (let i = 0; i < tokens.length; i++) if (skuForCode(r.id, tokens[i])) { code = tokens[i].toUpperCase(); idx = i; break; }
+    if (!code) { const m = line.match(/\b([A-Z]{2,5}\d{2,4})\b/i); if (m) errors.push(`${m[1].toUpperCase()} isn't in the ${r.name} code list. Add the code on the item first.`); continue; }
+    const sku = skuForCode(r.id, code);
+    const rest = line.slice(line.toUpperCase().indexOf(code) + code.length);
+    const nums = (rest.match(/-?\d[\d,]*(\.\d+)?/g) || []).map(s => Number(s.replace(/,/g, "")));
+    if (!nums.length) { errors.push(`${code}: no quantity found`); continue; }
     let qty, amount;
     if (wantAmount && nums.length >= 2) { qty = nums[nums.length - 2]; amount = nums[nums.length - 1]; }
     else { qty = nums[nums.length - 1]; amount = qty * Number(prod(sku).retail_price); }
-    const o = out[sku] || (out[sku] = { sku, qty: 0, amount: 0 });
+    const o = out[sku] || (out[sku] = { sku, code, qty: 0, amount: 0 });
     o.qty += qty; o.amount = round2(o.amount + amount);
   }
   return { lines: Object.values(out), errors };
 }
+const afterRetailerSave = () => { if (state.tab === "retailer") renderRetailer(); else render(); };
 
 function pasteSalesSheet(r) {
   openSheet(`
-    <h2 style="margin-top:0">${esc(r.name)} sales report</h2>
-    <label class="field"><span>Sales month</span><input id="mon" type="month" value="${ym(new Date())}"></label>
-    <label class="field"><span>Paste one line per piece: SKU, quantity, amount</span><textarea id="txt" placeholder="APO055	2	154&#10;APO057	2	138"></textarea></label>
+    <h2>${esc(r.name)} sales report</h2>
+    <label class="field"><span>Sales month</span><input id="mon" type="month" value="${ym(new Date(new Date().getFullYear(), new Date().getMonth() - 1, 1))}"></label>
+    <label class="field"><span>Paste one line per item: ${esc(r.name)} code, quantity, amount</span><textarea id="txt" placeholder="APO055	2	154&#10;APO057	2	138"></textarea></label>
     <button class="btn primary block" id="prev">Check report</button><div id="out"></div>`, root => {
     root.querySelector("#prev").onclick = async () => {
-      const mon = root.querySelector("#mon").value, { lines, errors } = parseLines(root.querySelector("#txt").value, true);
+      const mon = root.querySelector("#mon").value, { lines, errors } = parseLines(root.querySelector("#txt").value, true, r);
       const reportId = `${r.code}-SALES-${mon}`;
       let existing = [];
       try { existing = await q(sb.from("sales").select("id").eq("report_id", reportId)); } catch {}
       const total = round2(lines.reduce((t, l) => t + l.amount, 0)), pcs = lines.reduce((t, l) => t + l.qty, 0);
       const comm = round2(total * Number(r.commission_rate));
       root.querySelector("#out").innerHTML = `
-        ${errors.length ? `<div class="card" style="border-color:var(--rust)">${errors.map(esc).join("<br>")}</div>` : ""}
-        <div class="scroll-x"><table class="simple"><tr><th>Piece</th><th class="r">Qty</th><th class="r">Amount</th></tr>
-        ${lines.map(l => { const full = l.qty * Number(prod(l.sku).retail_price); return `<tr><td>${esc(prod(l.sku).name)}<div class="small muted">${l.sku}${l.amount < full ? ` · <span style="color:var(--brass)">below retail (${RM(full)})</span>` : ""}</div></td><td class="r">${l.qty}</td><td class="r">${RM(l.amount)}</td></tr>`; }).join("")}
+        ${errors.length ? `<div class="warn-banner" style="margin-top:12px">${errors.map(esc).join("<br>")}</div>` : ""}
+        <div class="scroll-x"><table class="simple"><tr><th>Item</th><th class="r">Qty</th><th class="r">Amount</th></tr>
+        ${lines.map(l => { const full = l.qty * Number(prod(l.sku).retail_price); return `<tr><td>${esc(prod(l.sku).name)}<div class="small muted">${esc(l.code)}${l.amount < full ? ` · <span style="color:var(--rust)">below retail (${RM(full)})</span>` : ""}</div></td><td class="r">${l.qty}</td><td class="r">${RM(l.amount)}</td></tr>`; }).join("")}
         <tr><td><strong>${pcs} pieces</strong></td><td></td><td class="r"><strong>${RM(total)}</strong></td></tr>
         <tr><td class="muted">Commission ${Math.round(Number(r.commission_rate) * 100)}%</td><td></td><td class="r muted">−${RM(comm)}</td></tr>
         <tr><td>You receive</td><td></td><td class="r"><strong>${RM(total - comm)}</strong></td></tr></table></div>
-        ${existing.length ? `<p class="tag brass" style="display:inline-block;margin-top:10px">${monthLabel(mon)} already has ${existing.length} lines saved. Saving replaces them with this report.</p>` : ""}
+        ${existing.length ? `<div class="warn-banner" style="margin-top:10px">${monthLabel(mon)} already has ${existing.length} lines saved. Saving replaces them with this report.</div>` : ""}
         ${lines.length ? `<button class="btn primary block" id="save" style="margin-top:10px">Save ${monthLabel(mon)} sales</button>` : ""}`;
       const s = root.querySelector("#save"); if (!s) return;
       s.onclick = async () => {
@@ -609,7 +890,7 @@ function pasteSalesSheet(r) {
           if (existing.length) await q(sb.from("sales").delete().eq("report_id", reportId));
           await q(sb.from("sales").insert(lines.map(l => ({ sold_at: last.toISOString(), sale_month: mon + "-01", channel: "retailer", location_id: r.id, report_id: reportId, sku: l.sku, qty: l.qty, unit_price: Number(prod(l.sku).retail_price), amount: l.amount }))));
           await q(sb.from("payouts").upsert({ location_id: r.id, period_month: mon + "-01", sales_amount: total, commission: comm, net_amount: round2(total - comm) }, { onConflict: "location_id,period_month" }));
-          await loadStock(); closeSheet(); toast(`${monthLabel(mon)} saved · ${pcs} pieces`); render();
+          await loadStock(); closeSheet(); toast(`${monthLabel(mon)} saved · ${pcs} pieces`); state.rTab = "sales"; state.rMonth = mon; afterRetailerSave();
         } catch (e) { fail(e); }
       };
     };
@@ -618,45 +899,61 @@ function pasteSalesSheet(r) {
 
 function tallySheet(r) {
   openSheet(`
-    <h2 style="margin-top:0">Tally ${esc(r.name)} stock</h2>
-    <label class="field"><span>Paste the shop's stock balance: SKU and quantity per line</span><textarea id="txt" placeholder="APO042	4&#10;APO044	6"></textarea></label>
+    <h2>Tally ${esc(r.name)} stock</h2>
+    <label class="field"><span>Paste the shop's stock balance: code and quantity per line</span><textarea id="txt" placeholder="APO042	4&#10;APO044	6"></textarea></label>
     <button class="btn primary block" id="go">Compare</button><div id="out"></div>`, root => root.querySelector("#go").onclick = () => {
-      const { lines, errors } = parseLines(root.querySelector("#txt").value, false);
+      const { lines, errors } = parseLines(root.querySelector("#txt").value, false, r);
       const shop = Object.fromEntries(lines.map(l => [l.sku, l.qty]));
       const skus = new Set([...Object.keys(shop), ...state.products.filter(p => stockAt(r.id, p.sku) !== 0).map(p => p.sku)]);
       const diffs = [...skus].map(sku => ({ sku, app: stockAt(r.id, sku), shop: shop[sku] || 0 })).filter(d => d.app !== d.shop);
       const pcs = lines.reduce((t, l) => t + l.qty, 0);
-      root.querySelector("#out").innerHTML = (errors.length ? `<div class="card">${errors.map(esc).join("<br>")}</div>` : "") + (diffs.length ? `
+      root.querySelector("#out").innerHTML = (errors.length ? `<div class="warn-banner" style="margin-top:12px">${errors.map(esc).join("<br>")}</div>` : "") + (diffs.length ? `
         <h3 style="margin-top:14px">${diffs.length} don't match</h3>
-        <table class="simple"><tr><th>Piece</th><th class="r">App</th><th class="r">Shop</th></tr>${diffs.map(d => `<tr><td>${esc(prod(d.sku)?.name)}<div class="small muted">${d.sku}</div></td><td class="r">${d.app}</td><td class="r">${d.shop}</td></tr>`).join("")}</table>
-        <p class="small muted">Check for a missing sales report or restock first. If the shop's count is right, accept it.</p>
+        <table class="simple"><tr><th>Item</th><th class="r">App</th><th class="r">Shop</th></tr>${diffs.map(d => `<tr><td>${esc(prod(d.sku)?.name)}<div class="small muted">${esc(codeAt(r.id, d.sku) || "No code")}</div></td><td class="r">${d.app}</td><td class="r">${d.shop}</td></tr>`).join("")}</table>
+        <p class="small muted">Check for a missing sales report or delivery first. If the shop's count is right, accept it.</p>
         <button class="btn block" id="accept">Use the shop's counts</button>`
         : `<div class="card" style="margin-top:12px"><h3>Everything matches</h3><p class="muted">${lines.length} items, ${pcs} pieces.</p></div>`);
       const a = root.querySelector("#accept"); if (a) a.onclick = async () => {
         const rows = diffs.map(d => d.shop > d.app ? { sku: d.sku, qty: d.shop - d.app, to_location: r.id, reason: "correction", notes: "Shop stock tally" } : { sku: d.sku, qty: d.app - d.shop, from_location: r.id, reason: "correction", notes: "Shop stock tally" });
-        try { await q(sb.from("stock_movements").insert(rows)); await loadStock(); closeSheet(); toast("Counts updated"); render(); } catch (e) { fail(e); }
+        try { await q(sb.from("stock_movements").insert(rows)); await loadStock(); closeSheet(); toast("Counts updated"); afterRetailerSave(); } catch (e) { fail(e); }
       };
     });
 }
 
+/* delivery to a shop: pick items by name, type quantities; the shop code can be added now or later */
 function sendStockSheet(r) {
+  const list = activeProducts().slice().sort((a, b) => a.name.localeCompare(b.name));
+  const mon = new Date().toLocaleDateString("en-MY", { month: "short" }).toUpperCase();
+  const wsHas = stockTotalAt(workshop().id) > 0;
   openSheet(`
-    <h2 style="margin-top:0">Send stock to ${esc(r.name)}</h2>
-    <div class="chips"><button class="chip" data-src="new" aria-pressed="true">Newly made pieces</button><button class="chip" data-src="ws" aria-pressed="false">From workshop stock</button></div>
+    <h2>Send stock to ${esc(r.name)}</h2>
+    <div class="chips"><button class="chip" data-src="ws" aria-pressed="${wsHas}">From workshop stock</button><button class="chip" data-src="new" aria-pressed="${!wsHas}">Newly made pieces</button></div>
     <div class="two"><label class="field"><span>Date</span><input id="d" type="date" value="${ymd(new Date())}"></label>
-    <label class="field"><span>Restock ID</span><input id="ref" value="${new Date().toLocaleDateString("en-MY", { month: "short" }).toUpperCase()}-01"></label></div>
-    <label class="field"><span>Paste SKU and quantity per line</span><textarea id="txt" placeholder="APO042	4&#10;APO086	3"></textarea></label>
-    <button class="btn primary block" id="go">Save delivery</button>`, root => {
-    let src = "new";
-    root.querySelectorAll("[data-src]").forEach(b => b.onclick = () => { src = b.dataset.src; root.querySelectorAll("[data-src]").forEach(x => x.setAttribute("aria-pressed", x === b)); });
+    <label class="field"><span>Restock ID</span><input id="ref" value="${mon}-01"></label></div>
+    <input class="search" id="flt" type="search" placeholder="Search items">
+    <div class="list tight" id="pick">${list.map(p => { const c = codeAt(r.id, p.sku); return `<div class="row" data-name="${esc(p.name.toLowerCase())}"><div class="grow"><div class="title small" style="white-space:normal">${esc(p.name)}</div>
+      <div class="small muted">${c ? `<span class="code">${esc(c)}</span>` : `<input data-code="${p.sku}" placeholder="${esc(r.code || "Shop")} code (optional)" style="min-height:32px;padding:6px 10px;margin-top:4px;font-size:12px;width:170px">`} <span data-have="${p.sku}"></span></div></div>
+      <input type="number" inputmode="numeric" min="0" step="1" data-sku="${p.sku}" style="width:72px" placeholder="0"></div>`; }).join("")}</div>
+    <button class="btn primary block" id="go" style="margin-top:12px">Save delivery</button>`, root => {
+    let src = wsHas ? "ws" : "new";
+    const showHave = () => root.querySelectorAll("[data-have]").forEach(e => e.textContent = src === "ws" ? `· ${stockAt(workshop().id, e.dataset.have)} in workshop` : "");
+    showHave();
+    root.querySelectorAll("[data-src]").forEach(b => b.onclick = () => { src = b.dataset.src; root.querySelectorAll("[data-src]").forEach(x => x.setAttribute("aria-pressed", x === b)); showHave(); });
+    root.querySelector("#flt").oninput = e => { const s = e.target.value.toLowerCase(); root.querySelectorAll("#pick .row").forEach(row => row.hidden = s && !row.dataset.name.includes(s)); };
     root.querySelector("#go").onclick = async () => {
-      const { lines, errors } = parseLines(root.querySelector("#txt").value, false);
-      if (errors.length) return toast(errors[0]);
-      if (!lines.length) return toast("Paste at least one SKU and quantity");
-      const ws = workshop().id;
+      const rows = [...root.querySelectorAll("input[data-sku]")].map(i => ({ sku: i.dataset.sku, qty: parseInt(i.value, 10) || 0 })).filter(x => x.qty > 0);
+      if (!rows.length) return toast("Enter a quantity for at least one item");
+      const codes = [...root.querySelectorAll("input[data-code]")].map(i => ({ sku: i.dataset.code, code: i.value.trim().toUpperCase() })).filter(x => x.code);
+      for (const c of codes) { const o = skuForCode(r.id, c.code); if (o && o !== c.sku) return toast(`${c.code} is already ${prod(o)?.name}`); }
+      if (new Set(codes.map(c => c.code)).size !== codes.length) return toast("The same code is typed twice");
+      const ws = workshop().id, date = root.querySelector("#d").value, ref = root.querySelector("#ref").value.trim() || null;
       try {
-        await q(sb.from("stock_movements").insert(lines.map(l => ({ moved_on: root.querySelector("#d").value, sku: l.sku, qty: l.qty, to_location: r.id, from_location: src === "ws" ? ws : null, reason: src === "ws" ? "transfer" : "restock", ref: root.querySelector("#ref").value || null }))));
-        await loadStock(); closeSheet(); toast(`${lines.reduce((t, l) => t + l.qty, 0)} pieces sent to ${r.name}`); render();
+        if (codes.length) await q(sb.from("retailer_codes").upsert(codes.map(c => ({ location_id: r.id, ...c })), { onConflict: "location_id,sku" }));
+        await q(sb.from("stock_movements").insert(rows.map(x => ({ moved_on: date, sku: x.sku, qty: x.qty, to_location: r.id, from_location: src === "ws" ? ws : null, reason: src === "ws" ? "transfer" : "restock", ref }))));
+        await loadAll(); closeSheet();
+        const missing = rows.filter(x => !codeAt(r.id, x.sku)).length;
+        toast(`${rows.reduce((t, x) => t + x.qty, 0)} pieces sent to ${r.name}${missing ? ` · ${missing} without a code yet` : ""}`);
+        state.rTab = "in"; afterRetailerSave();
       } catch (e) { fail(e); }
     };
   });
@@ -694,15 +991,16 @@ function renderStock() {
   const places = [workshop(), ...retailers(), ...state.locations.filter(l => l.type === "market" && l.active)].filter(Boolean);
   const L = state.stockLoc, s = state.search.toLowerCase();
   const rows = state.products.map(p => ({ p, n: stockAt(L, p.sku) }))
-    .filter(x => (x.p.status === "Active" || x.n !== 0) && (!s || x.p.name.toLowerCase().includes(s) || x.p.sku.toLowerCase().includes(s)));
+    .filter(x => (x.p.status === "Active" || x.n !== 0) && (!s || x.p.name.toLowerCase().includes(s) || (x.p.family || "").toLowerCase().includes(s) || (x.p.category || "").toLowerCase().includes(s)));
   view.innerHTML = `<h1>Stock</h1>
     <div class="chips"><button class="chip" data-l="all" aria-pressed="${L === "all"}">All places · ${stockTotalAt("all")}</button>
     ${places.map(l => `<button class="chip" data-l="${l.id}" aria-pressed="${String(L) === String(l.id)}">${esc(l.name)} · ${stockTotalAt(l.id)}</button>`).join("")}</div>
-    <div class="btns"><button class="btn" id="add">Add new pieces</button><button class="btn" id="move">Move stock</button><button class="btn" id="products">Products</button></div>
+    <button class="btn primary block" id="newItem" style="margin-bottom:10px">+ New item</button>
+    <div class="btns"><button class="btn" id="add">Add pieces</button><button class="btn" id="move">Move stock</button><button class="btn" id="products">All items</button></div>
     <input class="search" id="search" type="search" placeholder="Search pieces" value="${esc(state.search)}">
     <div class="list tight">${rows.map(({ p, n }) => {
       const where = L === "all" ? places.map(l => [l, stockAt(l.id, p.sku)]).filter(([, k]) => k).map(([l, k]) => `${esc(l.name)} ${k}`).join(" · ") : "";
-      return `<div class="row" data-sku="${p.sku}"><div class="grow"><div class="title">${esc(p.name)}</div><div class="small muted">${p.sku}${p.status !== "Active" ? " · " + esc(p.status) : ""}${where ? " · " + where : ""}</div></div>
+      return `<div class="row" data-sku="${p.sku}"><div class="grow"><div class="title">${esc(p.name)}</div><div class="small muted">${esc(itemSub(p))}${p.status !== "Active" ? " · " + esc(p.status) : ""}${where ? " · " + where : ""}</div></div>
         <span class="num" style="font-size:18px;${n <= 0 ? "color:var(--rust)" : ""}">${n}</span></div>`;
     }).join("") || `<div class="empty">Nothing here.</div>`}</div>
     <p class="small muted">Tap a piece to adjust its count.</p>`;
@@ -711,6 +1009,7 @@ function renderStock() {
   $("#add").onclick = () => moveSheet({ to: L === "all" ? workshop().id : L, from: null, title: "Add new pieces", restock: true });
   $("#move").onclick = () => moveSheet({ from: workshop().id, to: retailers()[0]?.id, title: "Move stock" });
   $("#products").onclick = productsSheet;
+  $("#newItem").onclick = () => productForm(null);
   view.querySelectorAll("[data-sku]").forEach(r => r.onclick = () => adjustSheet(prod(r.dataset.sku), L === "all" ? workshop().id : L));
 }
 
@@ -728,10 +1027,10 @@ function moveSheet({ from, to, title, restock }) {
       <label class="field"><span>To</span><select id="to">${locOptions(to)}</select></label></div>
     <div class="two"><label class="field"><span>Date</span><input id="d" type="date" value="${ymd(new Date())}"></label>
     <label class="field"><span>Reference</span><input id="ref" placeholder="OCT-01"></label></div>
-    <div class="list tight" id="pick">${list.map(p => `<div class="row"><div class="grow"><div class="title small">${esc(p.name)}</div><div class="small muted" data-have="${p.sku}"></div></div>
+    <div class="list tight" id="pick">${list.map(p => `<div class="row"><div class="grow"><div class="title small">${esc(p.name)}</div><div class="small muted" data-have="${p.sku}" data-sub="${esc(itemSub(p))}"></div></div>
       <input type="number" inputmode="numeric" min="0" step="1" data-sku="${p.sku}" style="width:80px" placeholder="0"></div>`).join("")}</div>
     <button class="btn primary block" id="go">Save</button>`, root => {
-    const showHave = () => { const f = root.querySelector("#from").value; root.querySelectorAll("[data-have]").forEach(e => e.textContent = f ? `${stockAt(Number(f), e.dataset.have)} at source` : e.dataset.have); };
+    const showHave = () => { const f = root.querySelector("#from").value; root.querySelectorAll("[data-have]").forEach(e => e.textContent = f ? `${stockAt(Number(f), e.dataset.have)} at source` : e.dataset.sub); };
     root.querySelector("#from").onchange = showHave; showHave();
     root.querySelector("#go").onclick = async () => {
       const f = root.querySelector("#from").value, t = root.querySelector("#to").value;
@@ -747,7 +1046,7 @@ function moveSheet({ from, to, title, restock }) {
 function adjustSheet(p, at) {
   openSheet(`
     <h2 style="margin-top:0">${esc(p.name)}</h2>
-    <p class="muted small">${p.sku} · ${RM(p.retail_price)}</p>
+    <p class="muted small">${esc(itemSub(p))}${itemSub(p) ? " · " : ""}${RM(p.retail_price)}</p>
     <label class="field"><span>Place</span><select id="at">${locOptions(at)}</select></label>
     <p>App count here: <strong id="have">${stockAt(at, p.sku)}</strong></p>
     <div class="two"><label class="field"><span>Real count</span><input id="real" type="number" inputmode="numeric" step="1"></label>
@@ -766,39 +1065,49 @@ function adjustSheet(p, at) {
 }
 
 function productsSheet() {
+  const list = state.products.slice().sort((a, b) => (a.status !== "Active") - (b.status !== "Active") || a.name.localeCompare(b.name));
   openSheet(`
-    <h2 style="margin-top:0">Products</h2>
-    <button class="btn primary block" id="new">Add a product</button>
-    <div class="list tight" style="margin-top:12px">${state.products.map(p => `<div class="row" data-sku="${p.sku}"><div class="grow"><div class="title">${esc(p.name)}</div><div class="small muted">${p.sku} · ${esc(p.category || "")} · ${esc(p.status)}</div></div><span class="num">${RM(p.retail_price)}</span></div>`).join("")}</div>`, root => {
+    <h2>All items</h2>
+    <button class="btn primary block" id="new">+ New item</button>
+    <div class="list tight" style="margin-top:12px">${list.map(p => `<div class="row" data-sku="${p.sku}"><div class="grow"><div class="title">${esc(p.name)}</div><div class="small muted">${esc(itemSub(p))}${p.status !== "Active" ? ` · ${esc(p.status)}` : ""}</div></div><span class="num">${RM(p.retail_price)}</span></div>`).join("")}</div>`, root => {
     root.querySelector("#new").onclick = () => productForm(null);
     root.querySelectorAll("[data-sku]").forEach(r => r.onclick = () => productForm(prod(r.dataset.sku)));
   });
 }
 function productForm(p) {
-  const next = "APO" + String(Math.max(0, ...state.products.map(x => parseInt(x.sku.replace(/\D/g, ""), 10) || 0)) + 1).padStart(3, "0");
-  const v = p || { sku: next, status: "Active" };
-  const field = (k, label, type = "text") => `<label class="field"><span>${label}</span><input name="${k}" type="${type}" ${type === "number" ? 'step="0.01"' : ""} value="${esc(v[k] ?? "")}"></label>`;
+  const v = p || { status: "Active" };
+  const field = (k, label, type = "text", ph = "") => `<label class="field"><span>${label}</span><input name="${k}" type="${type}" ${type === "number" ? 'step="0.01" min="0" inputmode="decimal"' : ""} placeholder="${ph}" value="${esc(v[k] ?? "")}"></label>`;
+  const list = (k, vals) => `<datalist id="dl-${k}">${[...new Set(state.products.map(x => x[k]).filter(Boolean))].sort().map(x => `<option value="${esc(x)}">`).join("")}</datalist>`;
+  const withList = (k, label, ph) => field(k, label, "text", ph).replace("<input ", `<input list="dl-${k}" `) + list(k);
+  const codes = p ? state.codes.filter(c => c.sku === p.sku).map(c => `${esc(loc(c.location_id)?.name)}: ${esc(c.code)}`).join(" · ") : "";
   openSheet(`
-    <h2 style="margin-top:0">${p ? "Edit product" : "New product"}</h2>
+    <h2>${p ? "Edit item" : "New item"}</h2>
     <form id="f">
-      <div class="two">${field("sku", "SKU")}${field("retail_price", "Retail price (RM)", "number")}</div>
-      ${field("name", "Product name")}
-      <div class="two">${field("category", "Category")}${field("size", "Size")}</div>
-      <div class="two">${field("family", "Product family")}${field("collection", "Collection")}</div>
-      <label class="field"><span>Status</span><select name="status">${["Active", "Paused", "Replaced", "Discontinued"].map(s => `<option ${v.status === s ? "selected" : ""}>${s}</option>`).join("")}</select></label>
-      ${field("replacement_sku", "Replaced by SKU")}
-      ${field("photo", "Google Drive photo ID")}
-      ${field("notes", "Notes")}
-      <button class="btn primary block">Save product</button>
+      ${field("name", "Item name", "text", "Twisting Liana Vines Bracelet (Small)")}
+      <div class="two">${withList("family", "Family", "TLV Bracelet")}${withList("collection", "Collection", "TLV")}</div>
+      <div class="two">${withList("category", "Category", "Bracelet")}${withList("size", "Size", "Small")}</div>
+      <div class="two">${field("retail_price", "Retail price (RM)", "number")}
+        <label class="field"><span>Status</span><select name="status">${["Active", "Paused", "Replaced", "Discontinued"].map(s => `<option ${v.status === s ? "selected" : ""}>${s}</option>`).join("")}</select></label></div>
+      ${p ? "" : `<label class="field"><span>Pieces made so far (goes into workshop stock)</span><input name="start_qty" type="number" min="0" step="1" inputmode="numeric" placeholder="0"></label>`}
+      ${field("photo", "Google Drive photo ID (optional)")}
+      ${field("notes", "Notes (optional)")}
+      ${codes ? `<p class="small muted">Shop codes: ${codes}</p>` : ""}
+      <button class="btn primary block">${p ? "Save item" : "Add item"}</button>
     </form>`, root => root.querySelector("#f").onsubmit = async e => {
       e.preventDefault();
       const f = Object.fromEntries(new FormData(e.target));
-      for (const k in f) if (f[k] === "") f[k] = null;
-      f.sku = (f.sku || "").trim().toUpperCase(); f.retail_price = Number(f.retail_price) || 0;
-      if (!f.sku || !f.name) return toast("SKU and name are needed");
+      const start = parseInt(f.start_qty, 10) || 0; delete f.start_qty;
+      for (const k in f) if (typeof f[k] === "string") { f[k] = f[k].trim(); if (f[k] === "") f[k] = null; }
+      f.retail_price = Number(f.retail_price) || 0;
+      if (!f.name) return toast("Give the item a name");
       try {
-        if (p) await q(sb.from("products").update(f).eq("sku", p.sku)); else await q(sb.from("products").insert(f));
-        await loadAll(); closeSheet(); toast("Product saved"); render();
+        if (p) await q(sb.from("products").update(f).eq("sku", p.sku));
+        else {
+          f.sku = newKey();
+          await q(sb.from("products").insert(f));
+          if (start > 0) await q(sb.from("stock_movements").insert({ sku: f.sku, qty: start, to_location: workshop().id, reason: "restock", notes: "New item" }));
+        }
+        await loadAll(); closeSheet(); toast(p ? "Item saved" : start ? `${f.name} added · ${start} in workshop` : `${f.name} added`); render();
       } catch (err) { fail(err); }
     });
 }

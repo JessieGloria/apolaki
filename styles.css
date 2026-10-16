@@ -276,3 +276,21 @@ table.simple .r { text-align: right; }
 .tl-dot { background: var(--gold); }
 .tl-chip { background: var(--gold-bg); color: #8a6a35; }
 .tag { background: var(--gold-bg); color: #8a6a35; }
+
+/* retailer page */
+.retailer-card { cursor: pointer; transition: transform .1s ease; }
+.retailer-card:active { transform: scale(.98); }
+.back { display: inline-flex; align-items: center; gap: 6px; border: 0; background: none; color: var(--muted); font-size: 13px; font-weight: 600; padding: 4px 2px 10px; }
+.back svg { width: 7px; height: 12px; }
+button.hero-chip { cursor: pointer; padding: 7px 12px; font-size: 12px; }
+button.hero-chip:active { transform: scale(.96); }
+.code { display: inline-block; font-size: 10.5px; font-weight: 600; letter-spacing: .02em; color: var(--text); background: var(--accent-bg); border-radius: 6px; padding: 1px 6px; margin-right: 2px; font-variant-numeric: tabular-nums; }
+.code.none { color: var(--rust); background: #f8ebe6; }
+.mini-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.mini-grid div { background: var(--input-bg); border-radius: 10px; padding: 6px 8px; }
+.mini-grid span { display: block; font-size: 10.5px; color: var(--muted); }
+.mini-grid b { font-size: 14px; font-variant-numeric: tabular-nums; }
+table.simple tr[data-item] { cursor: pointer; }
+.row[data-item] { cursor: pointer; }
+.card.compact { padding: 14px 10px; }
+.card.compact table.simple td, .card.compact table.simple th { padding: 9px 4px; font-size: 12px; }
