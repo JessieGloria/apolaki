@@ -257,6 +257,29 @@ function paint() {
 /* =========================================================
    HOME
    ========================================================= */
+/* Apolaki account = opening balance + money in (markets, online, other sales, shop payouts received) − expenses, from the opening date.
+   Same sum as the BUSINESS ACCOUNT box in the Account Tracker sheet. */
+async function fetchBalance() {
+  const [st] = await q(sb.from("app_settings").select("value").eq("key", "opening_balance"));
+  const ob = st?.value || { amount: 0, date: "2026-01-01" };
+  const [sales, pays, exps] = await Promise.all([
+    q(sb.from("sales").select("amount").neq("channel", "retailer").gte("sold_at", new Date(ob.date + "T00:00").toISOString())),
+    q(sb.from("payouts").select("paid_amount,net_amount").eq("paid", true).gte("paid_on", ob.date)),
+    q(sb.from("expenses").select("amount").gte("spent_on", ob.date))
+  ]);
+  const moneyIn = round2(sales.reduce((t, x) => t + Number(x.amount), 0) + pays.reduce((t, p) => t + Number(p.paid_amount ?? p.net_amount), 0));
+  const out = round2(exps.reduce((t, x) => t + Number(x.amount), 0));
+  return { opening: Number(ob.amount) || 0, date: ob.date, moneyIn, out, balance: round2((Number(ob.amount) || 0) + moneyIn - out) };
+}
+function balanceCard(b) {
+  if (!b) return "";
+  const waiting = outbox().reduce((t, r) => t + Number(r.amount), 0);
+  return `<div class="hero acct" data-go="accounts"><span class="sun"></span>
+    <div class="eyebrow">APOLAKI ACCOUNT</div>
+    <div class="big">${RM(b.balance + waiting)}</div>
+    <div class="hero-chips"><span class="hero-chip">Since ${shortDate(b.date)} ${b.date.slice(0, 4)}</span><span class="hero-chip">In ${RM(b.moneyIn + waiting)}</span><span class="hero-chip">Out ${RM(b.out)}</span></div></div>`;
+}
+
 async function fetchHomeData() {
   const now = new Date(), ys = new Date(now.getFullYear(), 0, 1), ye = new Date(now.getFullYear() + 1, 0, 1);
   const pm = new Date(now.getFullYear(), now.getMonth() - 1, 1);
@@ -269,7 +292,8 @@ async function fetchHomeData() {
     q(sb.from("stock_movements").select("moved_on,qty,sku,from_location,to_location,reason,ref,created_at").order("moved_on", { ascending: false }).order("created_at", { ascending: false }).limit(30)),
     q(sb.from("payouts").select("location_id").eq("period_month", ymd(pm)))
   ]);
-  return { year: now.getFullYear(), sales, pays, exps, unpaid, recentSales, recentMoves, lastReports };
+  let balance = null; try { balance = await fetchBalance(); } catch {}
+  return { year: now.getFullYear(), sales, pays, exps, unpaid, recentSales, recentMoves, lastReports, balance };
 }
 
 async function renderHome() {
@@ -371,6 +395,7 @@ function drawHome(d, quiet) {
     <p class="hello">${greeting()}</p>
     <h1 class="big">How's Apolaki<br>doing today?</h1>
     <div class="ttabs"><button data-p="month" aria-pressed="${period === "month"}">This month</button><button data-p="year" aria-pressed="${period === "year"}">This year</button></div>
+    ${balanceCard(d.balance)}
     <div class="masonry"><div class="mcol">
       ${pc("g-sky tall", "Money in", RM(moneyIn), "accounts", `${esc(label)} · spent ${RM(spent)}`, true)}
       ${pc("g-sea", "Pieces in stock", pieces, "stock", `${places.length} places`)}
@@ -1203,7 +1228,8 @@ async function renderAccounts() {
     ]);
   } catch { if (!cached) view.innerHTML = `<h1 class="big">Money in<br>&amp; out</h1><div class="warn-banner">You're offline. Accounts need a connection.</div>`; return; }
   if (state.tab !== "accounts") return;
-  if (!cached || JSON.stringify([sales, pays, exps]) !== JSON.stringify(cached)) { localSet(ck, [sales, pays, exps]); drawAccounts(sales, pays, exps); }
+  try { const b = await fetchBalance(); if (JSON.stringify(b) !== JSON.stringify(state.balance)) { state.balance = b; localSet("balance", b); } } catch {}
+  if (!cached || JSON.stringify([sales, pays, exps]) !== JSON.stringify(cached) || !$("#acctCard")) { localSet(ck, [sales, pays, exps]); drawAccounts(sales, pays, exps); }
 }
 function drawAccounts(sales, pays, exps) {
   const view = $("#view");
@@ -1228,7 +1254,9 @@ function drawAccounts(sales, pays, exps) {
   const yearIn = months.reduce((t, m) => t + inc[m], 0), yearOut = months.reduce((t, m) => t + out[m], 0);
   const byCat = {}; exps.forEach(e => { const k = e.expense_group + "|" + e.category; byCat[k] = (byCat[k] || 0) + Number(e.amount); });
 
+  const bal = state.balance || localGet("balance", null);
   view.innerHTML = `<h1 class="big">Money in<br>&amp; out</h1>
+    ${bal ? `<div id="acctCard">${balanceCard(bal)}<div class="opening-row"><span class="small muted">Opening balance ${RM(bal.opening)} on ${shortDate(bal.date)} ${bal.date.slice(0, 4)}</span><button class="btn" id="editOpening">Edit</button></div></div>` : ""}
     <label class="field"><span>Month</span><input id="mon" type="month" value="${mon}"></label>
     <div class="figures">
       <div class="figure lead"><div class="label">Left in ${monthStart(mon).toLocaleDateString("en-MY", { month: "long" })}</div><div class="value">${RM(inc[mon] - out[mon])}</div></div>
@@ -1257,8 +1285,26 @@ function drawAccounts(sales, pays, exps) {
   $("#mon").onchange = e => { state.accMonth = e.target.value; render(); };
   $("#addExp").onclick = () => expenseForm(null);
   $("#addInc").onclick = () => incomeForm(null);
+  const eo = $("#editOpening"); if (eo) eo.onclick = () => openingForm(bal);
   view.querySelectorAll("[data-inc]").forEach(r => r.onclick = () => incomeForm(sales.find(x => x.id === Number(r.dataset.inc))));
   view.querySelectorAll("[data-exp]").forEach(r => r.onclick = () => expenseForm(mExps.find(e => e.id === Number(r.dataset.exp))));
+}
+
+function openingForm(b) {
+  openSheet(`
+    <h2>Opening balance</h2>
+    <p class="small muted">What the Apolaki bank account had on the start date. The account balance = this + money in − expenses from that date.</p>
+    <form id="f">
+      <label class="field"><span>Start date</span><input name="date" type="date" value="${b.date}" required></label>
+      <label class="field"><span>Balance on that date (RM, use minus if it was below zero)</span><input name="amount" type="number" step="0.01" inputmode="decimal" value="${b.opening}" required></label>
+      <button class="btn primary block">Save</button>
+    </form>`, root => root.querySelector("#f").onsubmit = async e => {
+      e.preventDefault(); const f = Object.fromEntries(new FormData(e.target));
+      try {
+        await q(sb.from("app_settings").upsert({ key: "opening_balance", value: { amount: round2(Number(f.amount)), date: f.date }, updated_at: new Date().toISOString() }, { onConflict: "key" }));
+        state.balance = null; localSet("balance", null); closeSheet(); toast("Opening balance saved"); render();
+      } catch (err) { fail(err); }
+    });
 }
 
 /* money in from a sale entered by hand: not from a market, an online order or a shop report */

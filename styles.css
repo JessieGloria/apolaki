@@ -349,3 +349,8 @@ input[type="date"]::-webkit-date-and-time-value, input[type="month"]::-webkit-da
 label.field { min-width: 0; }
 .two-btn { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 4px; }
 .two-btn .btn.primary { padding: 14px 10px; font-size: 13px; }
+.hero.acct { cursor: pointer; background: var(--g-sea); margin-bottom: 16px; }
+.hero.acct .big { font-size: 32px; }
+.hero .sun { top: 18px; right: 24px; }
+.opening-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: -6px 2px 16px; }
+.opening-row .btn { min-height: 32px; padding: 6px 14px; }
