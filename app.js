@@ -1647,6 +1647,8 @@ function drawAccounts(sales, pays, exps) {
   const byCat = {}; exps.forEach(e => { const k = e.expense_group + "|" + e.category; byCat[k] = (byCat[k] || 0) + Number(e.amount); });
 
   const bal = state.balance || localGet("balance", null);
+  /* balance brought in from last year, when the opening balance is set at the start of this year */
+  const carry = bal && bal.date && +bal.date.slice(0, 4) === ms.getFullYear() && bal.date.slice(5, 7) === "01" ? Number(bal.opening) || 0 : 0;
   view.innerHTML = `<h1 class="big">Money in<br>&amp; out</h1>
     ${bal ? `<div id="acctCard">${balanceCard(bal)}<div class="opening-row"><span class="small muted">Opening balance ${RM(bal.opening)} on ${shortDate(bal.date)} ${bal.date.slice(0, 4)}</span><button class="btn" id="editOpening">Edit</button></div></div>` : ""}
     <label class="field"><span>Month</span><input id="mon" type="month" value="${mon}"></label>
@@ -1661,8 +1663,9 @@ function drawAccounts(sales, pays, exps) {
     <div class="list tight">${mExps.map(e => `<div class="row" data-exp="${e.id}"><div class="grow"><div class="title">${esc(e.description || e.category)}</div><div class="small muted">${shortDate(e.spent_on)} · ${esc(e.category)}${e.paid_to ? " · " + esc(e.paid_to) : ""}</div></div><span class="num">${RM(e.amount)}</span></div>`).join("") || `<div class="empty">No expenses this month.</div>`}</div>
     <h2>${ms.getFullYear()} by month</h2>
     <div class="card scroll-x"><table class="simple"><tr><th>Month</th><th class="r">In</th><th class="r">Spent</th><th class="r">Left</th></tr>
+      ${carry ? `<tr><td>From ${ms.getFullYear() - 1}</td><td class="r muted">–</td><td class="r muted">–</td><td class="r" style="${carry < 0 ? "color:var(--rust)" : ""}">${RM(carry)}</td></tr>` : ""}
       ${months.filter(m => inc[m] || out[m]).map(m => `<tr><td>${monthStart(m).toLocaleDateString("en-MY", { month: "short" })}</td><td class="r">${RM(inc[m])}</td><td class="r">${RM(out[m])}</td><td class="r" style="${inc[m] - out[m] < 0 ? "color:var(--rust)" : ""}">${RM(inc[m] - out[m])}</td></tr>`).join("")}
-      <tr><td><strong>Year</strong></td><td class="r"><strong>${RM(yearIn)}</strong></td><td class="r"><strong>${RM(yearOut)}</strong></td><td class="r"><strong>${RM(yearIn - yearOut)}</strong></td></tr></table></div>
+      <tr><td><strong>Year</strong></td><td class="r"><strong>${RM(yearIn)}</strong></td><td class="r"><strong>${RM(yearOut)}</strong></td><td class="r"><strong style="${yearIn - yearOut + carry < 0 ? "color:var(--rust)" : ""}">${RM(yearIn - yearOut + carry)}</strong></td></tr></table></div>
     <h2>${ms.getFullYear()} profit and loss</h2>
     <div class="card scroll-x"><table class="simple">
       <tr><td>Product sales received</td><td class="r">${RM(yearIn)}</td></tr>
