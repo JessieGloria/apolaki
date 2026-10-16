@@ -77,6 +77,9 @@ const skuForCode = (locId, code) => state.codes.find(c => c.location_id === Numb
 /* shop price: the retailer's own price for an item, falling back to the original price */
 const shopPrice = (locId, sku) => { const c = state.codes.find(x => x.location_id === Number(locId) && x.sku === sku); return c && c.price != null ? Number(c.price) : Number(prod(sku)?.retail_price || 0); };
 const CAT_ORDER = ["Bracelet", "Earrings", "Ring", "Neck Piece"];
+const CAT_G = { Bracelet: "g-sky", Earrings: "g-sunset", Ring: "g-coral", "Neck Piece": "g-sea" };
+const catG = c => CAT_G[c] || ["g-mint", "g-dusk", "g-sea"][String(c || "").length % 3];
+const catIco = c => `<span class="cat-ico ${catG(c)}"><span>${esc(String(c || "?")[0])}</span></span>`;
 function groupByCategory(ps) {
   const g = {}; ps.forEach(p => (g[p.category || "Other"] = g[p.category || "Other"] || []).push(p));
   return Object.entries(g).sort((a, b) => ((CAT_ORDER.indexOf(a[0]) + 1) || 99) - ((CAT_ORDER.indexOf(b[0]) + 1) || 99) || a[0].localeCompare(b[0]))
@@ -156,7 +159,7 @@ function renderLogin(msg) {
   $("#view").innerHTML = `
   <div class="login">
     <div class="mark"><svg viewBox="0 0 64 56" aria-hidden="true"><path d="M32 4 L60 52 H4 Z" fill="none" stroke="currentColor" stroke-width="6" stroke-linejoin="round"/><path d="M21 40 L32 24 L43 40" fill="none" stroke="currentColor" stroke-width="5" stroke-linejoin="round" stroke-linecap="round"/></svg></div>
-    <h1>Apolaki</h1>
+    <h1>Welcome<br>back!</h1>
     <p class="muted">One piece, one sale, one market at a time.</p>
     ${msg ? `<p class="tag rust" style="margin-bottom:10px">${esc(msg)}</p>` : ""}
     <form id="loginForm">
@@ -246,16 +249,16 @@ async function fetchHomeData() {
 async function renderHome() {
   const view = $("#view");
   const cached = localGet("homeData", null);
-  if (cached && cached.lastReports) drawHome(cached); else view.innerHTML = `<p class="hello">${greeting()}</p><h1>Overview</h1>${SKEL}`;
+  if (cached && cached.lastReports) drawHome(cached); else view.innerHTML = `<p class="hello">${greeting()}</p><h1 class="big">How's Apolaki<br>doing today?</h1>${SKEL}`;
   try {
     const fresh = await fetchHomeData();
     if (JSON.stringify(fresh) !== JSON.stringify(cached)) { localSet("homeData", fresh); if (state.tab === "home") drawHome(fresh, true); }
-  } catch { if (!cached) view.innerHTML = `<p class="hello">${greeting()}</p><h1>Overview</h1><div class="warn-banner">You're offline. The Sell tab still works and syncs later.</div>`; }
+  } catch { if (!cached) view.innerHTML = `<p class="hello">${greeting()}</p><h1 class="big">How's Apolaki<br>doing today?</h1><div class="warn-banner">You're offline. The Sell tab still works and syncs later.</div>`; }
 }
 
 function greeting() {
   const h = new Date().getHours();
-  return `${h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"}${state.name ? ", " + esc(state.name) : ""}`;
+  return `Hi${state.name ? ", " + esc(state.name) : ""}! ${h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening"}.`;
 }
 
 /* one timeline of what happened lately: sales carts, retailer reports, stock moves, expenses */
@@ -335,26 +338,21 @@ function drawHome(d, quiet) {
   if (outbox().length) attn.push({ c: "var(--mauve)", t: `${outbox().length} sale line${outbox().length > 1 ? "s" : ""} waiting to sync`, s: "Will send when you're online", go: "market" });
 
   const acts = recentActivity(d);
-  const tile = (cls, n, l, go, icon, money) => `<button class="stat ${cls}" data-go="${go}"><svg viewBox="0 0 24 24">${ICONS[icon]}</svg><div class="n${money ? " money" : ""}">${n}</div><div class="l">${l}</div></button>`;
+  const pc = (cls, title, val, go, sub, sun) => `<button class="pcard ${cls}" data-go="${go}">${sun ? '<span class="sun"></span>' : ""}<div class="pc-title">${esc(title)}</div><div><span class="pc-pill">${val}</span>${sub ? `<div class="pc-sub">${esc(sub)}</div>` : ""}</div></button>`;
 
   view.innerHTML = `
     <p class="hello">${greeting()}</p>
-    <h1>Overview</h1>
-    <div class="hero">
-      <div class="hero-seg"><button data-p="month" aria-pressed="${period === "month"}">Month</button><button data-p="year" aria-pressed="${period === "year"}">Year</button></div>
-      <div class="eyebrow">MONEY IN · ${esc(label.toUpperCase())}</div>
-      <div class="big">${RM(moneyIn)}</div>
-      <div class="hero-chips">
-        <span class="hero-chip">Spent ${RM(spent)}</span>
-        <span class="hero-chip">${moneyIn - spent >= 0 ? "Left" : "Short"} ${RM(Math.abs(moneyIn - spent))}</span>
-      </div>
-    </div>
-    <div class="tile-grid">
-      ${tile("s-coral", RM(due), "Payouts due", "retailers", "clock", true)}
-      ${tile("s-sage", pieces, "Pieces in stock", "stock", "box")}
-      ${tile("s-peach", low.length, "Running low", "stock", "warn")}
-      ${tile("s-mauve", activeMarkets.length, activeMarkets.length === 1 ? "Market open" : "Markets open", "market", "tent")}
-    </div>
+    <h1 class="big">How's Apolaki<br>doing today?</h1>
+    <div class="ttabs"><button data-p="month" aria-pressed="${period === "month"}">This month</button><button data-p="year" aria-pressed="${period === "year"}">This year</button></div>
+    <div class="masonry"><div class="mcol">
+      ${pc("g-sky tall", "Money in", RM(moneyIn), "accounts", `${esc(label)} · spent ${RM(spent)}`, true)}
+      ${pc("g-sea", "Pieces in stock", pieces, "stock", `${places.length} places`)}
+      ${pc("g-mint", moneyIn - spent >= 0 ? "Left" : "Short", RM(Math.abs(moneyIn - spent)), "accounts", "Money in minus spent")}
+    </div><div class="mcol">
+      ${pc("g-sunset", "Payouts due", RM(due), "retailers", d.unpaid.length ? d.unpaid.map(u => monthStart(u.period_month.slice(0, 7)).toLocaleDateString("en-MY", { month: "short" })).join(", ") : "All paid")}
+      ${pc("g-coral tall", "Running low", low.length, "stock", low.length ? low.slice(0, 2).map(x => x.p.name.toLowerCase().replace(/\b\w/g, c => c.toUpperCase())).join(", ") + (low.length > 2 ? "…" : "") : "All stocked", true)}
+      ${pc("g-dusk", activeMarkets.length === 1 ? "Market open" : "Markets open", activeMarkets.length, "market", activeMarkets.length ? activeMarkets.map(m => m.name).join(", ") : "Tap to start one")}
+    </div></div>
     ${attn.length ? `<h2>Needs attention</h2><div class="card">${attn.map((a, i) => `<div class="attn" data-ai="${i}"><span class="dot" style="background:${a.c}"></span><div class="grow">${esc(a.t)}<span class="small muted">${esc(a.s)}</span></div>${CHEV}</div>`).join("")}</div>` : ""}
     <h2>Money in by month</h2>
     <div class="card">
@@ -396,7 +394,7 @@ async function renderSell() {
   const choices = markets.map(m => `<option value="${m.id}" ${t && t.key === m.id ? "selected" : ""}>${esc(m.name)}</option>`).join("")
     + `<option value="online" ${t && t.key === "online" ? "selected" : ""}>Online orders (from workshop)</option>`;
   if (!t) {
-    view.innerHTML = `<h1>Sell</h1><div class="card"><h3>Start a market</h3><p class="muted">Create the market, bring stock from the workshop, then tap pieces to sell.</p><div class="btns"><button class="btn primary" id="newMarket">New market</button><button class="btn" id="goOnline">Record an online order</button></div></div>`;
+    view.innerHTML = `<h1 class="big">Sell at<br>the market</h1><div class="card"><h3>Start a market</h3><p class="muted">Create the market, bring stock from the workshop, then tap pieces to sell.</p><div class="btns"><button class="btn primary" id="newMarket">New market</button><button class="btn" id="goOnline">Record an online order</button></div></div>`;
     $("#newMarket").onclick = newMarketSheet;
     $("#goOnline").onclick = () => { state.sellAt = "online"; localSet("sellAt", "online"); render(); };
     return;
@@ -406,7 +404,7 @@ async function renderSell() {
     .map(p => ({ p, left: stockAt(t.stockLoc, p.sku) })).sort((a, b) => (b.left > 0) - (a.left > 0) || a.p.name.localeCompare(b.p.name));
   const n = cartLines().reduce((x, l) => x + l.qty, 0);
   document.body.classList.toggle("has-cart", n > 0);
-  view.innerHTML = `<h1>Sell</h1>
+  view.innerHTML = `<h1 class="big">Sell at<br>the market</h1>
     <label class="field"><span>Selling at</span><select id="sellAt">${choices}</select></label>
     <div class="btns">
       ${t.market ? `<button class="btn" id="bring">Bring stock</button>` : ""}
@@ -418,12 +416,12 @@ async function renderSell() {
     <div class="grid" id="grid">${items.map(({ p, left }) => {
       const inCart = state.cart[p.sku] || 0, img = photo(p);
       return `<button class="tile ${left - inCart <= 0 && !inCart ? "out" : ""} ${inCart ? "in-cart" : ""}" data-sku="${p.sku}" type="button">
-        ${img ? `<img src="${img}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph',textContent:'${initials(p.name)}'}))">` : `<div class="ph">${initials(p.name)}</div>`}
+        ${img ? `<img src="${img}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph ${catG(p.category)}',textContent:'${initials(p.name)}'}))">` : `<div class="ph ${catG(p.category)}">${initials(p.name)}</div>`}
         ${inCart ? `<span class="count">${inCart}</span>` : ""}
         <div class="name">${esc(p.name)}</div>
         <div class="meta">${RM(p.retail_price)} · ${Math.max(0, left - inCart)} left</div></button>`;
     }).join("") || `<div class="empty">No pieces match.</div>`}</div>
-    ${n ? `<div class="cartbar"><div><div>${n} piece${n > 1 ? "s" : ""}</div><div class="num" style="font-size:20px;font-weight:500">${RM(cartGross())}</div></div><button class="btn" id="review">Review sale</button></div>` : ""}`;
+    ${n ? `<div class="cartbar"><div><div class="small">${n} piece${n > 1 ? "s" : ""} in this sale</div><div class="num" style="font-size:20px;font-weight:700">${RM(cartGross())}</div></div><button class="btn" id="review">Continue</button></div>` : ""}`;
   $("#sellAt").onchange = e => { state.sellAt = e.target.value; localSet("sellAt", e.target.value); state.cart = {}; render(); };
   $("#search").oninput = e => { state.search = e.target.value; const pos = e.target.selectionStart; render(); const i = $("#search"); i.focus(); i.setSelectionRange(pos, pos); };
   $("#grid").onclick = e => {
@@ -559,16 +557,16 @@ async function renderRetailers() {
   const view = $("#view");
   let owed = localGet("owed", {});
   const draw = () => {
-    view.innerHTML = `<h1>Retailers</h1>
-    ${retailers().map(r => `<div class="card retailer-card" data-open="${r.id}">
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><h3>${esc(r.name)}</h3><span style="display:flex;align-items:center;gap:8px"><span class="tag">${esc(r.code || "")} · ${Math.round(Number(r.commission_rate) * 100)}%</span>${CHEV}</span></div>
-      <div class="figures" style="margin:12px 0 0">
-        <div class="figure"><div class="label">On their shelf</div><div class="value">${stockTotalAt(r.id)}</div></div>
-        <div class="figure"><div class="label">Owed to you</div><div class="value" style="${owed[r.id] ? "color:var(--rust)" : ""}">${RM(owed[r.id] || 0)}</div></div>
-      </div></div>`).join("")}
-    <button class="btn block" id="addR">Add a retailer</button>`;
+    const rs = retailers(), G = ["g-sky", "g-sunset", "g-sea", "g-coral", "g-mint", "g-dusk"];
+    const card = (r, i) => `<button class="pcard ${G[i % G.length]}${i % 4 === 0 || i % 4 === 3 ? " tall" : ""} retailer-card" data-open="${r.id}">${i % 4 === 0 ? '<span class="sun"></span>' : ""}
+      <div><div class="pc-title">${esc(r.name)}</div><span class="pc-pill">${esc(r.code || "")} · ${Math.round(Number(r.commission_rate) * 100)}%</span></div>
+      <div><div class="pc-big">${stockTotalAt(r.id)}<span style="font-size:12px;font-weight:500"> pieces</span></div><div class="pc-sub">${owed[r.id] ? `Owes you ${RM(owed[r.id])}` : "Nothing owed"}</div></div></button>`;
+    view.innerHTML = `<h1 class="big">Your<br>retailers</h1>
+    <div class="masonry"><div class="mcol">${rs.filter((_, i) => i % 2 === 0).map((r) => card(r, rs.indexOf(r))).join("")}</div><div class="mcol">${rs.filter((_, i) => i % 2 === 1).map(r => card(r, rs.indexOf(r))).join("")}
+      <button class="pcard g-mint" id="addR2" style="min-height:120px"><div class="pc-title">+ Add a<br>retailer</div><div class="pc-sub">Another shop that stocks Apolaki</div></button></div></div>
+    `;
     view.querySelectorAll("[data-open]").forEach(c => c.onclick = () => openRetailer(Number(c.dataset.open)));
-    $("#addR").onclick = () => openSheet(`
+    $("#addR2").onclick = () => openSheet(`
       <h2>Add a retailer</h2>
       <form id="f"><label class="field"><span>Shop name</span><input name="name" required></label>
       <div class="two"><label class="field"><span>Short code</span><input name="code" required maxlength="6" placeholder="TAA"></label>
@@ -669,15 +667,23 @@ const codeChip = it => it.code ? `<span class="code">${esc(it.code)}</span>` : `
 async function renderRetailer() {
   const view = $("#view"), r = loc(state.retailerId);
   if (!r) return go("retailers");
-  const tabs = [["dash", "Dashboard"], ["stock", "Current stock"], ["in", "Stock in"], ["sales", "Monthly sales"], ["analysis", "Analysis"]];
+  const tabs = [["dash", "Dashboard"], ["stock", "Stock"], ["in", "Stock in"], ["sales", "Sales"], ["analysis", "Analysis"]];
+  const owed = localGet("owed", {})[r.id] || 0;
+  const IC = { box: '<path d="M3 7l9-4 9 4-9 4zM3 7v10l9 4 9-4V7M12 11v10"/>', coin: '<circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5c0-1 1.1-1.5 2.5-1.5s2.5.6 2.5 1.6-1.1 1.4-2.5 1.7-2.5.7-2.5 1.7 1.1 1.6 2.5 1.6 2.5-.5 2.5-1.5"/>', pct: '<path d="M19 5 5 19M7 7h.01M17 17h.01"/><circle cx="7" cy="7" r="2"/><circle cx="17" cy="17" r="2"/>' };
+  const st = (k, t) => `<span><svg viewBox="0 0 24 24">${IC[k]}</svg>${t}</span>`;
   const head = () => `
-    <button class="back" id="back">${'<svg viewBox="0 0 8 13"><path d="M6.5 1.5 1.5 6.5 6.5 11.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>'} Retailers</button>
-    <div class="hero">
-      <div class="eyebrow">${esc((r.code || "").toUpperCase())} · ${Math.round(Number(r.commission_rate) * 100)}% COMMISSION</div>
-      <div class="big" style="font-size:24px;margin-bottom:10px">${esc(r.name)}</div>
-      <div class="hero-chips"><button class="hero-chip" data-a="paste">Paste sales</button><button class="hero-chip" data-a="send">Send stock</button><button class="hero-chip" data-a="tally">Tally stock</button><button class="hero-chip" data-a="pay">Payouts</button></div>
-    </div>
-    <div class="chips">${tabs.map(([k, l]) => `<button class="chip" data-rt="${k}" aria-pressed="${state.rTab === k}">${l}</button>`).join("")}</div>`;
+    <div class="detail">
+      <div class="detail-hero g-sky"><span class="sun"></span>
+        <button class="back" id="back"><svg viewBox="0 0 8 13"><path d="M6.5 1.5 1.5 6.5 6.5 11.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg> Retailers</button>
+      </div>
+      <div class="detail-panel">
+        <span class="fav">${esc((r.code || "").slice(0, 3))}</span>
+        <h1>${esc(r.name)}</h1>
+        <div class="stats">${st("box", `${stockTotalAt(r.id)} pieces`)}${st("coin", owed ? `${RM(owed)} owed` : "Nothing owed")}${st("pct", `${Math.round(Number(r.commission_rate) * 100)}% commission`)}</div>
+        <div class="detail-actions"><button class="btn" data-a="paste">Paste sales</button><button class="btn" data-a="send">Send stock</button><button class="btn" data-a="tally">Tally</button><button class="btn" data-a="pay">Payouts</button></div>
+      </div>
+      <div class="detail-body">
+        <div class="ttabs">${tabs.map(([k, l]) => `<button data-rt="${k}" aria-pressed="${state.rTab === k}">${l}</button>`).join("")}</div>`;
   const bindHead = () => {
     $("#back").onclick = () => go("retailers");
     view.querySelectorAll("[data-rt]").forEach(b => b.onclick = () => { state.rTab = b.dataset.rt; state.rFilter = null; renderRetailer(); });
@@ -687,7 +693,7 @@ async function renderRetailer() {
     const items = analyseRetailer(r, d);
     const body = { dash: rDashboard, stock: rStock, in: rStockIn, sales: rSales, analysis: rAnalysis }[state.rTab](r, d, items);
     const open = [...view.querySelectorAll("details[data-key][open]")].map(e => e.dataset.key);
-    view.innerHTML = head() + body;
+    view.innerHTML = head() + body + "</div></div>";
     view.querySelectorAll("details[data-key]").forEach(e => { if (open.includes(e.dataset.key)) e.open = true; });
     bindHead();
     view.querySelectorAll("[data-item]").forEach(e => e.onclick = ev => { ev.preventDefault(); itemAtRetailerSheet(r, items.find(i => i.sku === e.dataset.item)); });
@@ -697,12 +703,12 @@ async function renderRetailer() {
     view.querySelectorAll("[data-mon]").forEach(b => b.onclick = () => { state.rMonth = b.dataset.mon; draw(d); });
   };
   const cached = localGet("rdata:" + r.id, null);
-  if (cached) draw(cached); else { view.innerHTML = head() + SKEL; bindHead(); }
+  if (cached) draw(cached); else { view.innerHTML = head() + SKEL + "</div></div>"; bindHead(); }
   try {
     const d = await loadRetailerData(r);
     if (state.tab !== "retailer" || state.retailerId !== r.id) return;
     if (!cached || JSON.stringify(d) !== JSON.stringify(cached)) draw(d);
-  } catch { if (!cached) { view.innerHTML = head() + `<div class="warn-banner">You're offline. Connect to see ${esc(r.name)}'s records.</div>`; bindHead(); } }
+  } catch { if (!cached) { view.innerHTML = head() + `<div class="warn-banner">You're offline. Connect to see ${esc(r.name)}'s records.</div></div></div>`; bindHead(); } }
 }
 
 function rDashboard(r, d, items) {
@@ -766,7 +772,7 @@ function rStock(r, d, items) {
     ${noCode ? `<div class="warn-banner">${noCode} item${noCode > 1 ? "s" : ""} on the shelf still need${noCode > 1 ? "" : "s"} a ${esc(r.name)} code. Tap to add it.</div>` : ""}
     <div class="chips" style="margin-top:0">${[["in", "In stock"], ["out", "Sold out"], ["nocode", "No code"], ["all", "All"]].map(([k, l]) => `<button class="chip" data-f="${k}" aria-pressed="${f === k}">${l}</button>`).join("")}</div>
     ${groupByCategory(list.map(i => i.p)).map(([cat, ps]) => { const its = ps.map(p => list.find(i => i.sku === p.sku)); const n = its.reduce((t, i) => t + Math.max(0, i.current), 0);
-      return `<details class="group" data-key="rs:${esc(cat)}"><summary><span class="grow">${esc(cat)}<span class="small muted" style="display:block;font-weight:500">${its.length} item${its.length > 1 ? "s" : ""} · ${RM(its.reduce((t, i) => t + Math.max(0, i.value), 0))}</span></span><span class="count">${n}</span>${CHEV}</summary>
+      return `<details class="group" data-key="rs:${esc(cat)}"><summary>${catIco(cat)}<span class="grow">${esc(cat)}<span class="small muted" style="display:block;font-weight:500">${its.length} item${its.length > 1 ? "s" : ""} · ${RM(its.reduce((t, i) => t + Math.max(0, i.value), 0))}</span></span><span class="count">${n}</span>${CHEV}</summary>
       <div class="inner">${its.map(i => `<div class="row" data-item="${i.sku}"><div class="grow"><div class="title" style="white-space:normal">${esc(i.p.name)}</div>
       <div class="small muted">${codeChip(i)} In ${i.stockIn} · Sold ${i.sold} · ${RM(i.price)}${i.current > 0 ? ` · Value ${RM(i.value)}` : ""}</div>
       <div style="margin-top:5px">${tag(i.action, ACTION_TONE[i.action])}</div></div>
@@ -1027,7 +1033,7 @@ function renderStock() {
   const L = state.stockLoc, s = state.search.toLowerCase();
   const rows = state.products.map(p => ({ p, n: stockAt(L, p.sku) }))
     .filter(x => (x.p.status === "Active" || x.n !== 0) && (!s || x.p.name.toLowerCase().includes(s) || (x.p.family || "").toLowerCase().includes(s) || (x.p.category || "").toLowerCase().includes(s)));
-  view.innerHTML = `<h1>Stock</h1>
+  view.innerHTML = `<h1 class="big">Your<br>stock</h1>
     <div class="chips"><button class="chip" data-l="all" aria-pressed="${L === "all"}">All places · ${stockTotalAt("all")}</button>
     ${places.map(l => `<button class="chip" data-l="${l.id}" aria-pressed="${String(L) === String(l.id)}">${esc(l.name)} · ${stockTotalAt(l.id)}</button>`).join("")}</div>
     <button class="btn primary block" id="newItem" style="margin-bottom:10px">+ New item</button>
@@ -1035,7 +1041,7 @@ function renderStock() {
     <input class="search" id="search" type="search" placeholder="Search pieces" value="${esc(state.search)}">
     ${groupByCategory(rows.map(x => x.p)).map(([cat, ps]) => {
       const n = ps.reduce((t, p) => t + Math.max(0, stockAt(L, p.sku)), 0);
-      return `<details class="group" data-cat="${esc(cat)}" ${s || state.openCats.has(cat) ? "open" : ""}><summary><span class="grow">${esc(cat)}<span class="small muted" style="display:block;font-weight:500">${ps.length} item${ps.length > 1 ? "s" : ""}</span></span><span class="count">${n}</span>${CHEV}</summary>
+      return `<details class="group" data-cat="${esc(cat)}" ${s || state.openCats.has(cat) ? "open" : ""}><summary>${catIco(cat)}<span class="grow">${esc(cat)}<span class="small muted" style="display:block;font-weight:500">${ps.length} item${ps.length > 1 ? "s" : ""}</span></span><span class="count">${n}</span>${CHEV}</summary>
       <div class="inner">${ps.map(p => { const k = stockAt(L, p.sku);
         const where = L === "all" ? places.map(l => [l, stockAt(l.id, p.sku)]).filter(([, q]) => q).map(([l, q]) => `${esc(l.name)} ${q}`).join(" · ") : "";
         return `<div class="row" data-sku="${p.sku}"><div class="grow"><div class="title" style="white-space:normal">${esc(p.name)}</div><div class="small muted">${[p.size && p.size !== "Free" ? esc(p.size) : null, p.status !== "Active" ? esc(p.status) : null, where || null].filter(Boolean).join(" · ")}</div></div>
@@ -1160,7 +1166,7 @@ async function renderAccounts() {
   const mon = state.accMonth || ym(new Date()), ms = monthStart(mon), me = nextMonth(ms);
   const ys = new Date(ms.getFullYear(), 0, 1), ye = new Date(ms.getFullYear() + 1, 0, 1);
   const ck = "acc:" + ms.getFullYear(), cached = localGet(ck, null);
-  if (cached) drawAccounts(...cached); else if (!view.querySelector("#mon")) view.innerHTML = `<h1>Accounts</h1>${SKEL}`;
+  if (cached) drawAccounts(...cached); else if (!view.querySelector("#mon")) view.innerHTML = `<h1 class="big">Money in<br>&amp; out</h1>${SKEL}`;
   let sales, pays, exps;
   try {
     [sales, pays, exps] = await Promise.all([
@@ -1168,7 +1174,7 @@ async function renderAccounts() {
       q(sb.from("payouts").select("*").eq("paid", true).gte("paid_on", ymd(ys)).lt("paid_on", ymd(ye))),
       q(sb.from("expenses").select("*").gte("spent_on", ymd(ys)).lt("spent_on", ymd(ye)).order("spent_on", { ascending: false }))
     ]);
-  } catch { if (!cached) view.innerHTML = `<h1>Accounts</h1><div class="warn-banner">You're offline. Accounts need a connection.</div>`; return; }
+  } catch { if (!cached) view.innerHTML = `<h1 class="big">Money in<br>&amp; out</h1><div class="warn-banner">You're offline. Accounts need a connection.</div>`; return; }
   if (state.tab !== "accounts") return;
   if (!cached || JSON.stringify([sales, pays, exps]) !== JSON.stringify(cached)) { localSet(ck, [sales, pays, exps]); drawAccounts(sales, pays, exps); }
 }
@@ -1194,7 +1200,7 @@ function drawAccounts(sales, pays, exps) {
   const yearIn = months.reduce((t, m) => t + inc[m], 0), yearOut = months.reduce((t, m) => t + out[m], 0);
   const byCat = {}; exps.forEach(e => { const k = e.expense_group + "|" + e.category; byCat[k] = (byCat[k] || 0) + Number(e.amount); });
 
-  view.innerHTML = `<h1>Accounts</h1>
+  view.innerHTML = `<h1 class="big">Money in<br>&amp; out</h1>
     <label class="field"><span>Month</span><input id="mon" type="month" value="${mon}"></label>
     <div class="figures">
       <div class="figure lead"><div class="label">Left in ${monthStart(mon).toLocaleDateString("en-MY", { month: "long" })}</div><div class="value">${RM(inc[mon] - out[mon])}</div></div>
