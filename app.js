@@ -401,7 +401,7 @@ function drawHome(d, quiet) {
     <div class="masonry"><div class="mcol">
       ${pc("g-sky tall", "Money in", RM(moneyIn), "accounts", `${esc(label)} · spent ${RM(spent)}`, true)}
       ${pc("g-sea", "Pieces in stock", pieces, "stock", `${places.length} places`)}
-      ${pc("g-mint", moneyIn - spent >= 0 ? "Left" : "Short", RM(Math.abs(moneyIn - spent)), "accounts", "Money in minus spent")}
+      ${pc("g-mint", `${moneyIn - spent >= 0 ? "Profit" : "Loss"} this ${period === "year" ? "year" : "month"}`, RM(Math.abs(moneyIn - spent)), "accounts", "Money in minus spent")}
     </div><div class="mcol">
       ${pc("g-sunset", "Payouts due", RM(due), "retailers", d.unpaid.length ? d.unpaid.map(u => monthStart(u.period_month.slice(0, 7)).toLocaleDateString("en-MY", { month: "short" })).join(", ") : "All paid")}
       ${pc("g-coral tall", "Running low", low.length, "stock", low.length ? low.slice(0, 2).map(x => x.p.name.toLowerCase().replace(/\b\w/g, c => c.toUpperCase())).join(", ") + (low.length > 2 ? "…" : "") : "All stocked", true)}
@@ -438,6 +438,34 @@ function sellTarget() {
   if (!m) return null;
   return { key: m.id, name: m.name, stockLoc: m.id, channel: "market", locationId: m.id, market: m };
 }
+/* the same piece in different sizes becomes one tile; tap it to pick the size */
+const SIZE_SHORT = { "extra small": "XS", "small": "S", "medium": "M", "large": "L", "extra large": "XL" };
+const SIZE_ORDER = ["XXS", "XS", "S", "M", "L", "XL", "XXL"];
+const sizeShort = sz => SIZE_SHORT[String(sz || "").toLowerCase()] || null;
+function baseName(name) {
+  return String(name)
+    .replace(/^\s*size\s+(xxs|xs|s|m|l|xl|xxl)\s+/i, "")
+    .replace(/\s*[-–]\s*(xxs|xs|s|m|l|xl|xxl)\s*$/i, "")
+    .replace(/\s*\(?\b(extra small|small|medium|large|extra large)\b\)?\s*$/i, "")
+    .replace(/\s+/g, " ").trim();
+}
+const nice = n => /[a-z]/.test(n) ? n : n.toLowerCase().replace(/(^|[\s(\-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
+function sizeGroups(products, locId) {
+  const map = new Map();
+  for (const p of products) {
+    const sz = sizeShort(p.size);
+    const key = sz ? (p.family || "") + "|" + baseName(p.name).toLowerCase() : "sku|" + p.sku;
+    if (!map.has(key)) map.set(key, { key, name: nice(sz ? baseName(p.name) : p.name), items: [] });
+    map.get(key).items.push({ p, size: sz || p.size || "", left: stockAt(locId, p.sku) });
+  }
+  const list = [...map.values()].map(g => {
+    if (g.items.length === 1) g.name = nice(g.items[0].p.name);
+    g.items.sort((a, b) => SIZE_ORDER.indexOf(a.size) - SIZE_ORDER.indexOf(b.size));
+    g.left = g.items.reduce((t, it) => t + Math.max(0, it.left), 0);
+    return g;
+  });
+  return list.sort((a, b) => (b.left > 0) - (a.left > 0) || a.name.localeCompare(b.name));
+}
 function cartLines() { return Object.entries(state.cart).filter(([, n]) => n > 0).map(([sku, n]) => ({ p: prod(sku), qty: n })); }
 function cartGross() { return cartLines().reduce((t, l) => t + l.qty * Number(l.p.retail_price), 0); }
 
@@ -454,10 +482,31 @@ async function renderSell() {
     return;
   }
   const s = state.search.toLowerCase();
-  const items = activeProducts().filter(p => !s || p.name.toLowerCase().includes(s) || (p.family || "").toLowerCase().includes(s))
-    .map(p => ({ p, left: stockAt(t.stockLoc, p.sku) })).sort((a, b) => (b.left > 0) - (a.left > 0) || a.p.name.localeCompare(b.p.name));
+  const groups = sizeGroups(activeProducts().filter(p => !s || p.name.toLowerCase().includes(s) || (p.family || "").toLowerCase().includes(s)), t.stockLoc);
   const n = cartLines().reduce((x, l) => x + l.qty, 0);
   document.body.classList.toggle("has-cart", n > 0);
+  const pic = p => { const img = photo(p); return img ? `<img src="${img}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph ${catG(p.category)}',innerHTML:this.dataset.ico}))" data-ico="${esc(catSvg(p.category))}">` : `<div class="ph ${catG(p.category)}">${catSvg(p.category)}</div>`; };
+  const stepper = (sku, qty) => `<span class="stepper"><button type="button" data-dec="${sku}" aria-label="One fewer">−</button><b>${qty}</b><button type="button" data-inc="${sku}" aria-label="One more">+</button></span>`;
+  const tileHtml = g => {
+    const inCart = g.items.reduce((t2, it) => t2 + (state.cart[it.p.sku] || 0), 0);
+    const left = g.items.reduce((t2, it) => t2 + Math.max(0, it.left), 0);
+    const open = state.openGroup === g.key;
+    if (g.items.length === 1) {
+      const it = g.items[0];
+      return `<div class="tile ${it.left - inCart <= 0 && !inCart ? "out" : ""} ${inCart ? "in-cart" : ""}" data-add="${it.p.sku}" role="button" tabindex="0">
+        ${pic(it.p)}<div class="name">${esc(g.name)}</div>
+        <div class="meta">${RM(it.p.retail_price)} · ${Math.max(0, it.left - inCart)} left</div>
+        ${inCart ? stepper(it.p.sku, inCart) : ""}</div>`;
+    }
+    const prices = [...new Set(g.items.map(it => Number(it.p.retail_price)))];
+    return `<div class="tile group-tile ${left - inCart <= 0 && !inCart ? "out" : ""} ${inCart || open ? "in-cart" : ""}" data-group="${esc(g.key)}" role="button" tabindex="0">
+        ${pic(g.items[0].p)}${inCart ? `<span class="count">${inCart}</span>` : ""}
+        <div class="name">${esc(g.name)}</div>
+        <div class="meta">${prices.length > 1 ? "From " : ""}${RM(Math.min(...prices))} · ${left} left</div>
+        <div class="size-chips">${g.items.map(it => `<span class="${it.left > 0 ? "" : "none"}">${esc(it.size)}</span>`).join("")}</div></div>
+      ${open ? `<div class="sizes"><div class="sizes-head"><b>Choose size</b><button type="button" class="link" data-close="1">Done</button></div>
+        ${g.items.map(it => { const q2 = state.cart[it.p.sku] || 0; return `<div class="size-row ${it.left - q2 <= 0 && !q2 ? "out" : ""}"><span class="size-name">${esc(it.size)}</span><span class="size-meta">${RM(it.p.retail_price)} · ${Math.max(0, it.left - q2)} left</span>${stepper(it.p.sku, q2)}</div>`; }).join("")}</div>` : ""}`;
+  };
   view.innerHTML = `<h1 class="big">Sell at<br>the market</h1>
     <label class="field"><span>Selling at</span><select id="sellAt">${choices}</select></label>
     <div class="btns">
@@ -467,23 +516,26 @@ async function renderSell() {
       ${t.market ? `<button class="btn danger" id="endMarket">End market</button>` : ""}
     </div>
     <input class="search" id="search" type="search" placeholder="Search pieces" value="${esc(state.search)}">
-    <div class="grid" id="grid">${items.map(({ p, left }) => {
-      const inCart = state.cart[p.sku] || 0, img = photo(p);
-      return `<button class="tile ${left - inCart <= 0 && !inCart ? "out" : ""} ${inCart ? "in-cart" : ""}" data-sku="${p.sku}" type="button">
-        ${img ? `<img src="${img}" alt="" loading="lazy" onerror="this.replaceWith(Object.assign(document.createElement('div'),{className:'ph ${catG(p.category)}',innerHTML:this.dataset.ico}))" data-ico="${esc(catSvg(p.category))}">` : `<div class="ph ${catG(p.category)}">${catSvg(p.category)}</div>`}
-        ${inCart ? `<span class="count">${inCart}</span>` : ""}
-        <div class="name">${esc(p.name)}</div>
-        <div class="meta">${RM(p.retail_price)} · ${Math.max(0, left - inCart)} left</div></button>`;
-    }).join("") || `<div class="empty">No pieces match.</div>`}</div>
-    ${n ? `<div class="cartbar"><div><div class="small">${n} piece${n > 1 ? "s" : ""} in this sale</div><div class="num" style="font-size:20px;font-weight:700">${RM(cartGross())}</div></div><button class="btn" id="review">Continue</button></div>` : ""}`;
-  $("#sellAt").onchange = e => { state.sellAt = e.target.value; localSet("sellAt", e.target.value); state.cart = {}; render(); };
+    <div class="grid" id="grid">${groups.map(tileHtml).join("") || `<div class="empty">No pieces match.</div>`}</div>
+    ${n ? `<div class="cartbar"><div><div class="small">${n} piece${n > 1 ? "s" : ""} in this sale · <button type="button" class="link" id="clearCart">Clear</button></div><div class="num" style="font-size:20px;font-weight:700">${RM(cartGross())}</div></div><button class="btn" id="review">Continue</button></div>` : ""}`;
+  $("#sellAt").onchange = e => { state.sellAt = e.target.value; localSet("sellAt", e.target.value); state.cart = {}; state.openGroup = null; render(); };
   $("#search").oninput = e => { state.search = e.target.value; const pos = e.target.selectionStart; render(); const i = $("#search"); i.focus(); i.setSelectionRange(pos, pos); };
-  $("#grid").onclick = e => {
-    const b = e.target.closest(".tile"); if (!b) return;
-    const sku = b.dataset.sku, left = stockAt(t.stockLoc, sku), have = state.cart[sku] || 0;
+  const add = sku => {
+    const left = stockAt(t.stockLoc, sku), have = state.cart[sku] || 0;
     if (have >= left) toast("Stock here says none left. Added anyway — fix the count later in Stock.");
-    state.cart[sku] = have + 1; render();
+    state.cart[sku] = have + 1;
   };
+  $("#grid").onclick = e => {
+    const inc = e.target.closest("[data-inc]"), dec = e.target.closest("[data-dec]");
+    if (inc) { add(inc.dataset.inc); return render(); }
+    if (dec) { const k = dec.dataset.dec; state.cart[k] = Math.max(0, (state.cart[k] || 0) - 1); if (!state.cart[k]) delete state.cart[k]; return render(); }
+    if (e.target.closest("[data-close]")) { state.openGroup = null; return render(); }
+    const g = e.target.closest("[data-group]");
+    if (g) { state.openGroup = state.openGroup === g.dataset.group ? null : g.dataset.group; return render(); }
+    const one = e.target.closest("[data-add]");
+    if (one) { add(one.dataset.add); render(); }
+  };
+  if ($("#clearCart")) $("#clearCart").onclick = () => { state.cart = {}; state.discount = 0; state.openGroup = null; toast("Cart cleared"); render(); };
   $("#newMarket").onclick = newMarketSheet;
   $("#today").onclick = () => todaySheet(t);
   if ($("#review")) $("#review").onclick = () => reviewSheet(t);
@@ -496,7 +548,7 @@ function reviewSheet(t) {
     const lines = cartLines(), gross = cartGross(), disc = Math.min(Number(state.discount) || 0, gross);
     openSheet(`
       <h2 style="margin-top:0">Sale at ${esc(t.name)}</h2>
-      <div class="list tight">${lines.map(l => `<div class="row"><div class="grow"><div class="title">${esc(l.p.name)}</div><div class="small muted">${RM(l.p.retail_price)} each</div></div>
+      <div class="list tight">${lines.map(l => `<div class="row"><div class="grow"><div class="title">${esc(nice(l.p.name))}</div><div class="small muted">${RM(l.p.retail_price)} each</div></div>
         <button class="chip" data-d="-1" data-sku="${l.p.sku}" aria-label="One fewer">−</button><span class="num">${l.qty}</span><button class="chip" data-d="1" data-sku="${l.p.sku}" aria-label="One more">+</button></div>`).join("")}</div>
       <label class="field"><span>Discount on this sale (RM)</span><input id="disc" type="number" inputmode="decimal" min="0" step="0.01" value="${state.discount || ""}"></label>
       <div class="chips">${PAYMENTS.map(p => `<button class="chip" data-pay="${p}" aria-pressed="${state.payment === p}">${p}</button>`).join("")}</div>
