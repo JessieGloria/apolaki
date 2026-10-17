@@ -197,7 +197,7 @@ async function loadAll() {
   try {
     const [p, l, c] = await Promise.all([
       q(sb.from("products").select("*").order("name")),
-      q(sb.from("locations").select("*").order("id")),
+      q(live("locations", "*").order("id")),
       q(sb.from("retailer_codes").select("location_id,sku,code,price"))
     ]);
     state.products = p; state.locations = l; state.codes = c;
@@ -349,13 +349,15 @@ function recentActivity(d) {
   for (const s of d.recentSales || []) {
     if (s.report_id) { const k = "r" + s.report_id; (carts[k] = carts[k] || { at: s.sold_at, kind: "report", loc: s.location_id, rep: s.report_id, qty: 0, amt: 0 }); carts[k].qty += s.qty || 0; carts[k].amt += Number(s.amount); continue; }
     if (s.channel === "other") { ev.push({ at: s.sold_at, chip: "Money in", title: s.description || prod(s.sku)?.name || "Sale", right: RM(s.amount) }); continue; }
-    const k = "c" + (s.cart_id || s.sold_at);
-    (carts[k] = carts[k] || { at: s.sold_at, kind: "sale", loc: s.location_id, ch: s.channel, qty: 0, amt: 0, items: [] });
+    const k = s.channel === "market" ? "m" + s.location_id : "c" + (s.cart_id || s.sold_at);   /* all of a market's sales and days in one line */
+    (carts[k] = carts[k] || { at: s.sold_at, kind: "sale", loc: s.location_id, ch: s.channel, qty: 0, amt: 0, items: [], days: new Set() });
+    if (s.sold_at > carts[k].at) carts[k].at = s.sold_at; carts[k].days.add(ymd(new Date(s.sold_at)));
     carts[k].qty += s.qty || 0; carts[k].amt += Number(s.amount); if (s.sku) carts[k].items.push(prod(s.sku)?.name || s.sku);
   }
   for (const c of Object.values(carts)) {
     if (c.kind === "report") ev.push({ at: c.at, chip: "Shop report", title: `${loc(c.loc)?.name || "Retailer"} · ${c.qty} pieces sold`, right: RM(c.amt) });
     else { const where = c.ch === "online" ? "Online order" : loc(c.loc)?.name || "Market";
+      if (c.ch === "market") { ev.push({ at: c.at, chip: "Market", title: where, sub: [c.days.size > 1 ? `${c.days.size} days` : "", c.qty ? `${c.qty} pieces` : ""].filter(Boolean).join(" · "), right: RM(c.amt) }); continue; }
       ev.push({ at: c.at, chip: c.ch === "online" ? "Online" : "Market sale", title: c.items.length ? `${c.items.slice(0, 2).join(", ")}${c.items.length > 2 ? ` +${c.items.length - 2}` : ""}` : where, sub: c.items.length && c.ch !== "online" ? where : "", right: RM(c.amt) }); }
   }
   const moves = {};
@@ -545,8 +547,10 @@ async function renderSell() {
   const choices = markets.map(m => `<option value="${m.id}" ${t && t.key === m.id ? "selected" : ""}>${esc(m.name)}</option>`).join("")
     + `<option value="online" ${t && t.key === "online" ? "selected" : ""}>Online orders (from workshop)</option>`;
   if (!t) {
-    view.innerHTML = `<h1 class="big">Sell at<br>the market</h1><div class="card"><h3>Start a market</h3><p class="muted">Create the market, bring stock from the workshop, then tap pieces to sell.</p><div class="btns"><button class="btn primary" id="newMarket">New market</button><button class="btn" id="goOnline">Record an online order</button></div></div>`;
+    view.innerHTML = `<h1 class="big">Sell at<br>the market</h1><div class="card"><h3>Start a market</h3><p class="muted">Create the market, bring stock from the workshop, then tap pieces to sell.</p><div class="btns"><button class="btn primary" id="newMarket">New market</button><button class="btn" id="goOnline">Record an online order</button></div></div>
+      <button type="button" class="btn block" id="pastMarkets" style="margin-top:12px">Markets &amp; analysis</button>`;
     $("#newMarket").onclick = newMarketSheet;
+    $("#pastMarkets").onclick = marketsSheet;
     $("#goOnline").onclick = () => { state.sellAt = "online"; localSet("sellAt", "online"); render(); };
     return;
   }
@@ -588,6 +592,7 @@ async function renderSell() {
       ${t.market ? `<button class="btn" id="bring">Bring stock</button>` : ""}
       <button class="btn" id="today">Today's sales</button>
       <button class="btn" id="newMarket">New market</button>
+      <button class="btn" id="pastMarkets">All markets</button>
       ${t.market ? `<button class="btn danger" id="endMarket">End market</button>` : ""}
     </div>
     <input class="search" id="search" type="search" placeholder="Search pieces" value="${esc(state.search)}">
@@ -631,6 +636,7 @@ async function renderSell() {
   }
   loadToday(t).then(changed => { if (changed && state.tab === "market" && $("#sheet").hidden && !state.editPrice) render(); });
   $("#newMarket").onclick = newMarketSheet;
+  $("#pastMarkets").onclick = marketsSheet;
   $("#today").onclick = () => todaySheet(t);
   if ($("#review")) $("#review").onclick = () => reviewSheet(t);
   if ($("#bring")) $("#bring").onclick = () => moveSheet({ to: t.market.id, from: workshop()?.id, title: `Bring stock to ${t.market.name}` });
@@ -743,6 +749,94 @@ async function todaySheet(t) {
       await loadStock(); toast("Sale removed"); todaySheet(t); render();
     });
   });
+}
+
+/* =========================================================
+   MARKETS — every market (all its days together) with its numbers
+   ========================================================= */
+async function loadMarketData() {
+  const [sales, fees] = await Promise.all([
+    q(live("sales", "id,sold_at,amount,qty,sku,payment_method,location_id,cart_id,client_id,notes,description").eq("channel", "market")),
+    q(live("expenses", "spent_on,amount,description,paid_to").eq("category", "Market Fee"))
+  ]);
+  /* sales still waiting on this phone count too */
+  const local = outbox().filter(r => r.channel === "market" && !sales.some(s => s.client_id && s.client_id === r.client_id));
+  return { sales: sales.concat(local), fees };
+}
+function marketStats(m, d) {
+  const sl = d.sales.filter(s => s.location_id === m.id);
+  const total = sl.reduce((t, s) => t + Number(s.amount), 0);
+  const itemised = sl.filter(s => s.sku || s.description);
+  const pieces = itemised.reduce((t, s) => t + (s.qty || 0), 0);
+  const days = {}; sl.forEach(s => { const k = ymd(new Date(s.sold_at)); days[k] = (days[k] || 0) + Number(s.amount); });
+  /* market days: the dates set on the market, otherwise the days that had sales */
+  let dayList = [];
+  if (m.start_date) { for (let t = new Date(m.start_date + "T00:00"), e = new Date((m.end_date || m.start_date) + "T00:00"); t <= e; t.setDate(t.getDate() + 1)) dayList.push(ymd(t)); }
+  Object.keys(days).forEach(k => { if (!dayList.includes(k)) dayList.push(k); });
+  dayList.sort();
+  const nm = m.name.toLowerCase();
+  const feeRows = d.fees.filter(f => { const t = `${f.description || ""} ${f.paid_to || ""}`.toLowerCase(); return t.includes(nm) || nm.split(/\s+/).filter(w => w.length > 2 && !/market/.test(w)).some(w => t.includes(w)); });
+  const fee = m.fee != null ? Number(m.fee) : feeRows.reduce((t, f) => t + Number(f.amount), 0);
+  const feeKnown = m.fee != null || feeRows.length > 0;
+  const pay = {}; sl.forEach(s => { if (s.payment_method) pay[s.payment_method] = (pay[s.payment_method] || 0) + Number(s.amount); });
+  const sortDate = dayList[0] || feeRows.map(f => f.spent_on).sort()[0] || "0000";
+  return { m, sl, total, pieces, itemised: itemised.length > 0, imported: sl.length > 0 && !itemised.length, days, dayList, nDays: Math.max(1, dayList.length), fee, feeKnown,
+    net: total - fee, perDay: total / Math.max(1, dayList.length), pay, sortDate, running: !!m.active };
+}
+async function marketsSheet() {
+  let d;
+  try { d = await loadMarketData(); localSet("mdata", d); } catch (e) { d = localGet("mdata", null); if (!d) return fail(e); }
+  const list = state.locations.filter(l => l.type === "market").map(m => marketStats(m, d)).sort((a, b) => b.sortDate.localeCompare(a.sortDate));
+  const withSales = list.filter(x => x.total > 0);
+  const T = k => list.reduce((t, x) => t + x[k], 0);
+  const best = withSales.slice().sort((a, b) => b.perDay - a.perDay)[0];
+  const dates = x => !x.dayList.length ? "Dates not set" : x.dayList.length === 1 ? shortDate(x.dayList[0]) + " " + x.dayList[0].slice(0, 4) : `${shortDate(x.dayList[0])}–${shortDate(x.dayList[x.dayList.length - 1])} ${x.dayList[0].slice(0, 4)} · ${x.dayList.length} days`;
+  openSheet(`
+    <h2>Markets</h2>
+    <div class="figures">
+      <div class="figure lead"><div class="label">${list.length} markets · ${withSales.length} with sales</div><div class="value">${RM(T("total"))}</div></div>
+      <div class="figure"><div class="label">Booth fees</div><div class="value">${RM(T("fee"))}</div></div>
+      <div class="figure"><div class="label">After fees</div><div class="value">${RM(T("total") - T("fee"))}</div></div>
+      ${best ? `<div class="figure" style="grid-column:1/-1"><div class="label">Best per day</div><div class="value" style="font-size:16px">${esc(best.m.name)} · ${RM(best.perDay)} a day</div></div>` : ""}
+    </div>
+    <div class="list">${list.map(x => `<div class="row" data-mk="${x.m.id}"><div class="grow">
+      <div class="title" style="white-space:normal">${esc(x.m.name)}${x.running ? ` ${tag("Running", "green")}` : ""}</div>
+      <div class="small muted">${esc(dates(x))}${x.m.venue ? ` · ${esc(x.m.venue)}` : ""}</div>
+      <div class="small muted">${x.total ? `${RM(x.perDay)} a day` : x.feeKnown ? `<span style="color:var(--rust)">Fee paid, no sales recorded</span>` : "No sales recorded"}${x.feeKnown ? ` · fee ${RM(x.fee)} · after fee ${RM(x.net)}` : ""}</div></div>
+      <span class="num">${RM(x.total)}</span></div>`).join("") || `<div class="empty">No markets yet.</div>`}</div>`, root => {
+    root.querySelectorAll("[data-mk]").forEach(r => r.onclick = () => marketDetailSheet(list.find(x => x.m.id === Number(r.dataset.mk)), list));
+  });
+}
+function marketDetailSheet(x, all) {
+  const m = x.m, ranked = all.filter(y => y.total > 0).sort((a, b) => b.perDay - a.perDay), rank = ranked.indexOf(x) + 1;
+  /* typical (middle) day at the other markets — one huge market can't skew it */
+  const avgOthers = (() => { const o = ranked.filter(y => y !== x).map(y => y.perDay).sort((a, b) => a - b); if (!o.length) return null; const h = Math.floor(o.length / 2); return o.length % 2 ? o[h] : (o[h - 1] + o[h]) / 2; })();
+  /* pieces sold, sizes of one design together */
+  const by = {};
+  x.sl.forEach(s => { const p = s.sku ? prod(s.sku) : null; const k = p ? nice(baseName(p.name)) : (s.description || "Other piece"); const o = by[k] = by[k] || { name: k, qty: 0, amt: 0, cat: p?.category }; o.qty += s.qty || 0; o.amt += Number(s.amount); });
+  const items = Object.values(by).filter(o => o.name !== "Other piece" || o.qty).sort((a, b) => b.qty - a.qty || b.amt - a.amt);
+  const cats = {}; items.forEach(o => { const k = o.cat || "Other"; cats[k] = (cats[k] || 0) + o.amt; });
+  openSheet(`
+    <h2>${esc(m.name)}</h2>
+    <p class="small muted" style="margin-top:-6px">${x.dayList.length ? `${x.dayList.map(dd => shortDate(dd)).join(", ")} ${x.dayList[0].slice(0, 4)}` : "Dates not set"}${m.venue ? ` · ${esc(m.venue)}` : ""}${x.running ? " · running now" : ""}</p>
+    <div class="figures">
+      <div class="figure lead"><div class="label">Sales${x.dayList.length ? ` · ${x.nDays} day${x.nDays > 1 ? "s" : ""}` : ""}</div><div class="value">${RM(x.total)}</div></div>
+      <div class="figure"><div class="label">Per day</div><div class="value">${RM(x.perDay)}</div></div>
+      <div class="figure"><div class="label">Booth fee</div><div class="value">${x.feeKnown ? RM(x.fee) : "—"}</div></div>
+      <div class="figure"><div class="label">After fee</div><div class="value">${x.feeKnown ? RM(x.net) : "—"}</div></div>
+      <div class="figure"><div class="label">Fee share of sales</div><div class="value">${x.feeKnown && x.total ? Math.round(x.fee / x.total * 100) + "%" : "—"}</div></div>
+      ${x.itemised ? `<div class="figure"><div class="label">Pieces sold</div><div class="value">${x.pieces}</div></div><div class="figure"><div class="label">Avg per piece</div><div class="value">${x.pieces ? RM(x.total / x.pieces) : "—"}</div></div>` : ""}
+      ${rank ? `<div class="figure"><div class="label">Rank (per day)</div><div class="value">${rank} of ${ranked.length}</div></div>` : ""}
+    </div>
+    ${avgOthers != null && x.total ? `<p class="small muted">${x.perDay >= avgOthers ? "Above" : "Below"} a typical market day (${RM(avgOthers)}, the middle of the other markets).</p>` : ""}
+    ${!x.total ? `<div class="warn-banner">No sales recorded for this market${x.feeKnown ? `, but a ${RM(x.fee)} fee was paid` : ""}. If it went ahead, add its sales with “+ Add money in” on Accounts.</div>` : ""}
+    ${x.imported ? `<p class="small muted">Only daily totals were recorded for this market, so there's no breakdown by piece.</p>` : ""}
+    ${x.dayList.length ? `<h3>By day</h3><div class="card"><table class="simple">${x.dayList.map((dd, i) => `<tr><td>Day ${i + 1} · ${new Date(dd + "T00:00").toLocaleDateString("en-MY", { weekday: "short", day: "numeric", month: "short" })}</td><td class="r">${RM(x.days[dd] || 0)}</td></tr>`).join("")}
+      <tr><td><strong>Total</strong></td><td class="r"><strong>${RM(x.total)}</strong></td></tr></table></div>` : ""}
+    ${Object.keys(x.pay).length ? `<h3>Payments</h3><div class="card"><table class="simple">${Object.entries(x.pay).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="r">${RM(v)}</td><td class="r muted">${Math.round(v / x.total * 100)}%</td></tr>`).join("")}</table></div>` : ""}
+    ${x.itemised ? `<h3>What sold</h3><div class="card"><table class="simple"><tr><th>Piece</th><th class="r">Sold</th><th class="r">Sales</th></tr>${items.map(o => `<tr><td>${o.cat ? `<span class="cat-bar ${catG(o.cat)}"></span> ` : ""}${esc(o.name)}</td><td class="r">${o.qty}</td><td class="r">${RM(o.amt)}</td></tr>`).join("")}</table></div>
+      <h3>By category</h3><div class="card"><table class="simple">${Object.entries(cats).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr><td>${esc(CAT_PLURAL[k] || k)}</td><td class="r">${RM(v)}</td><td class="r muted">${x.total ? Math.round(v / x.total * 100) : 0}%</td></tr>`).join("")}</table></div>` : ""}
+  `);
 }
 
 function newMarketSheet() {
@@ -1751,10 +1845,16 @@ function drawAccounts(sales, pays, exps) {
 
   const mSales = sales.filter(s => monthOf(s.sold_at) === mon), mPays = pays.filter(p => monthOf(p.paid_on) === mon), mExps = exps.filter(e => monthOf(e.spent_on) === mon);
   const grouped = {};
-  mSales.filter(s => s.channel !== "other").forEach(s => { const k = ymd(new Date(s.sold_at)) + "|" + s.location_id + "|" + s.channel; grouped[k] = (grouped[k] || 0) + Number(s.amount); });
+  const mDays = {};
+  mSales.filter(s => s.channel !== "other").forEach(s => {
+    const day = ymd(new Date(s.sold_at)), k = (s.channel === "market" ? "M" : day) + "|" + s.location_id + "|" + s.channel;   /* a market's days count as one market */
+    grouped[k] = (grouped[k] || 0) + Number(s.amount); if (s.channel === "market") (mDays[k] = mDays[k] || new Set()).add(day);
+  });
   const incomeRows = [
     ...mPays.map(p => ({ d: p.paid_on, t: `${loc(p.location_id)?.name} payout`, s: `${monthLabel(p.period_month.slice(0, 7))} sales`, a: Number(p.paid_amount ?? p.net_amount) })),
-    ...Object.entries(grouped).map(([k, a]) => { const [d, l, c] = k.split("|"); return { d, t: c === "online" ? "Online orders" : loc(l)?.name || "Market", s: c === "online" ? "Online" : "Market", a }; }),
+    ...Object.entries(grouped).map(([k, a]) => { const [d, l, c] = k.split("|");
+      if (c === "market") { const ds = [...mDays[k]].sort(), n = ds.length; return { d: ds[n - 1], t: loc(l)?.name || "Market", s: `Market · ${n > 1 ? `${n} days, ${shortDate(ds[0])}–` : ""}${n > 1 ? shortDate(ds[n - 1]) : "1 day"}`, a, d0: ds[0] }; }
+      return { d, t: c === "online" ? "Online orders" : loc(l)?.name || "Market", s: c === "online" ? "Online" : "Market", a }; }),
     ...mSales.filter(s => s.channel === "other").map(s => ({ d: ymd(new Date(s.sold_at)), id: s.id, t: s.description || (s.sku ? prod(s.sku)?.name : "") || "Sale", s: ["Other sale", s.payment_method, s.sku && s.qty ? `${s.qty} × ${prod(s.sku)?.name || ""}` : null].filter(Boolean).join(" · "), a: Number(s.amount) }))
   ].sort((a, b) => b.d.localeCompare(a.d));
 
@@ -1773,7 +1873,7 @@ function drawAccounts(sales, pays, exps) {
       <div class="figure"><div class="label">Spent</div><div class="value">${RM(out[mon])}</div></div></div>
     <div class="two-btn"><button class="btn primary" id="addInc">+ Add money in</button><button class="btn primary" id="addExp">+ Add an expense</button></div>
     <h2>Money in</h2>
-    <div class="list tight">${incomeRows.map(r => `<div class="row"${r.id ? ` data-inc="${r.id}"` : ""}><div class="grow"><div class="title">${esc(r.t)}</div><div class="small muted">${shortDate(r.d)} · ${esc(r.s)}</div></div><span class="num">${RM(r.a)}</span></div>`).join("") || `<div class="empty">Nothing received this month yet.</div>`}</div>
+    <div class="list tight">${incomeRows.map(r => `<div class="row"${r.id ? ` data-inc="${r.id}"` : ""}><div class="grow"><div class="title">${esc(r.t)}</div><div class="small muted">${r.d0 ? "" : shortDate(r.d) + " · "}${esc(r.s)}</div></div><span class="num">${RM(r.a)}</span></div>`).join("") || `<div class="empty">Nothing received this month yet.</div>`}</div>
     <h2>Spent</h2>
     <div class="list tight">${mExps.map(e => `<div class="row" data-exp="${e.id}"><div class="grow"><div class="title">${esc(e.description || e.category)}</div><div class="small muted">${shortDate(e.spent_on)} · ${esc(e.category)}${e.paid_to ? " · " + esc(e.paid_to) : ""}</div></div><span class="num">${RM(e.amount)}</span></div>`).join("") || `<div class="empty">No expenses this month.</div>`}</div>
     <h2>${ms.getFullYear()} by month</h2>
