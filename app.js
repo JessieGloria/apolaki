@@ -484,6 +484,7 @@ function drawHome(d, quiet) {
     ${acts.length ? `<h2>Recent activity</h2><div class="tl">${acts.map(a => `<div class="tl-item"><span class="tl-dot"></span><div class="tl-card"><div class="tl-meta"><span class="tl-chip">${esc(a.chip)}</span><span>${ago(a.at)}</span></div><div class="tl-body"><span>${esc(a.title)}${a.sub ? `<span class="small muted" style="display:block">${esc(a.sub)}</span>` : ""}</span>${a.right ? `<strong>${a.right}</strong>` : ""}</div></div></div>`).join("")}</div>` : ""}`;
   view.querySelectorAll("[data-p]").forEach(b => b.onclick = () => { state.homePeriod = b.dataset.p; drawHome(d, true); });
   $("#shopRow").onclick = shopOrdersSheet;
+  watchShop();
   view.querySelectorAll("[data-go]").forEach(r => r.onclick = () => go(r.dataset.go));
   view.querySelectorAll("[data-ai]").forEach(r => r.onclick = () => { const a = attn[Number(r.dataset.ai)]; if (a.go === "shop") return shopOrdersSheet(); if (a.sell) { state.sellAt = a.sell; localSet("sellAt", a.sell); } go(a.go); });
   view.querySelectorAll("[data-place]").forEach(t => t.onclick = () => { state.stockLoc = Number(t.dataset.place); go("stock"); });
@@ -2021,11 +2022,35 @@ const SHOP_STATUS = { pending: "Waiting for payment", paid: "Paid · to make & s
 const SHOP_REGION = { semenanjung: "Peninsular Malaysia", sarawak: "Sarawak", sabah: "Sabah", overseas: "Overseas" };
 const waNum = ph => String(ph || "").replace(/\D/g, "").replace(/^0/, "60");
 let shopTab = "todo";
+let shopCache = [], shopSkipRefresh = false, shopLive = null;
+const fetchShopOrders = () => q(live("shop_orders", "*").order("created_at", { ascending: false }).limit(200));
 async function shopOrdersSheet() {
-  let orders = [];
-  try { orders = await q(live("shop_orders", "*").order("created_at", { ascending: false }).limit(200)); } catch (e) { return fail(e); }
+  try { shopCache = await fetchShopOrders(); } catch (e) { return fail(e); }
+  watchShop();
+  shopSkipRefresh = true; openSheet(...shopListPage());
+}
+/* re-read the orders and redraw the list if it changed (on Back, when the app comes back to the front, or when an order changes) */
+async function refreshShopList() {
+  const entry = pageStack.find(x => x.title === "Shop orders"); if (!entry) return;
+  let fresh; try { fresh = await fetchShopOrders(); } catch { return; }
+  if (JSON.stringify(fresh) === JSON.stringify(shopCache)) return;
+  shopCache = fresh;
+  const [html, bind] = shopListPage(); entry.html = html; entry.bind = bind;
+  if (pageStack[pageStack.length - 1] === entry && !$("#sheet").hidden) { shopSkipRefresh = true; showPage(entry); }
+}
+/* live updates: new orders and status changes show up without leaving the page */
+function watchShop() {
+  if (shopLive || !sb.channel) return;
+  shopLive = sb.channel("shop-orders").on("postgres_changes", { event: "*", schema: "public", table: "shop_orders" }, () => {
+    clearTimeout(watchShop.t);
+    watchShop.t = setTimeout(() => { refreshShopList(); localSet("homeData", null); if (state.tab === "home" && $("#sheet").hidden) renderHome(); }, 400);
+  }).subscribe();
+}
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshShopList(); });
+function shopListPage() {
+  const orders = shopCache;
   const tabs = [["todo", "To do", o => ["pending", "paid", "packed"].includes(o.status)], ["shipped", "Shipped", o => o.status === "shipped"], ["done", "Completed", o => o.status === "delivered"], ["cancelled", "Cancelled", o => o.status === "cancelled"]];
-  openSheet(`
+  return [`
     <h2>Shop orders</h2>
     <button class="btn block" id="shopSet">Shop settings</button>
     <div class="ttabs" style="margin-top:16px">${tabs.map(([k, l, f]) => `<button type="button" data-t="${k}" aria-pressed="${k === shopTab}">${l} <span class="muted">${orders.filter(f).length}</span></button>`).join("")}</div>
@@ -2035,16 +2060,26 @@ async function shopOrdersSheet() {
       root.querySelector("#ordList").innerHTML = list.length ? list.map(o => `<div class="row" data-o="${o.id}"><div class="grow"><div class="title">${esc(o.order_no)} · ${esc(o.customer_name)}</div>
         <div class="small muted">${ago(o.created_at)} · ${esc(SHOP_REGION[o.region] || o.region)}</div><span class="tag" style="margin-top:4px">${esc(SHOP_STATUS[o.status] || o.status)}</span></div>
         <span class="num">${o.total != null ? RM(o.total) : ""}</span>${CHEV}</div>`).join("") : `<div class="small muted" style="padding:12px 2px">No orders here.</div>`;
-      root.querySelectorAll("[data-o]").forEach(r => r.onclick = () => shopOrderPage(orders.find(o => o.id === Number(r.dataset.o))));
+      root.querySelectorAll("[data-o]").forEach(r => r.onclick = () => openShopOrder(Number(r.dataset.o)));
     };
     root.querySelectorAll("[data-t]").forEach(b => b.onclick = () => { shopTab = b.dataset.t; root.querySelectorAll("[data-t]").forEach(x => x.setAttribute("aria-pressed", x === b)); draw(); });
     root.querySelector("#shopSet").onclick = shopSettingsSheet;
     draw();
-  });
+    if (!shopSkipRefresh) refreshShopList();
+    shopSkipRefresh = false;
+  }];
 }
-async function shopOrderPage(o) {
-  let items = [];
-  try { items = await q(sb.from("shop_order_items").select("*").eq("order_id", o.id).order("id")); } catch (e) { return fail(e); }
+/* always read the order fresh from the database, so it shows the latest status */
+async function openShopOrder(id) {
+  try {
+    const [rows, items] = await Promise.all([q(live("shop_orders", "*").eq("id", id)), q(sb.from("shop_order_items").select("*").eq("order_id", id).order("id"))]);
+    if (!rows.length) return toast("Order not found");
+    const i = shopCache.findIndex(x => x.id === id); if (i >= 0) shopCache[i] = rows[0];
+    shopOrderPage(rows[0], items);
+  } catch (e) { fail(e); }
+}
+async function shopOrderPage(o, items) {
+  if (!items) try { items = await q(sb.from("shop_order_items").select("*").eq("order_id", o.id).order("id")); } catch (e) { return fail(e); }
   const made = items.filter(i => !i.ready);
   const addr = [o.address, [o.postcode, o.city].filter(Boolean).join(" "), o.state, o.region === "overseas" ? o.country : ""].filter(Boolean).join(", ");
   const msg = o.status === "delivered" ? `Hi ${o.customer_name}, hope you're enjoying your Apolaki piece! Thank you for your order ${o.order_no}.`
@@ -2087,11 +2122,20 @@ async function shopOrderPage(o) {
     <label class="field" style="margin-top:16px"><span>Private note</span><input id="anote" value="${esc(o.admin_note || "")}" placeholder="Only you see this"></label>
     ${!["cancelled", "delivered"].includes(o.status) ? `<button type="button" class="btn danger block" id="cancel" style="margin-top:6px">Cancel order</button>` : ""}`, root => {
     const act = async (action, p, done) => {
+      /* show it's working straight away */
+      const btns = [...root.querySelectorAll("button")], clicked = document.activeElement, label = clicked && clicked.textContent;
+      if (action !== "note") { btns.forEach(b => b.disabled = true); if (clicked && clicked.tagName === "BUTTON") clicked.textContent = "Saving…"; }
       try {
         const res = await q(sb.rpc("shop_order_action", { p_order: o.id, p_action: action, p: p || {} }));
-        if (["paid", "shipped", "cancel"].includes(action)) { await loadStock(); localSet("homeData", null); }
-        toast(done); shopOrderPage(res);
-      } catch (e) { fail(e); }
+        /* update the order list behind this page, so Back shows the new status */
+        const i = shopCache.findIndex(x => x.id === res.id); if (i >= 0) shopCache[i] = res;
+        const listEntry = pageStack.find(x => x.title === "Shop orders");
+        if (listEntry) { const [html, bind] = shopListPage(); listEntry.html = html; listEntry.bind = bind; }
+        toast(done); shopOrderPage(res, items);
+        /* stock, home counts: refresh in the background */
+        localSet("homeData", null);
+        (["paid", "shipped", "cancel"].includes(action) ? loadStock() : Promise.resolve()).then(() => { if (state.tab === "home") renderHome(); }).catch(() => {});
+      } catch (e) { btns.forEach(b => b.disabled = false); if (clicked && label) clicked.textContent = label; fail(e); }
     };
     let pay = PAY[0];
     root.querySelectorAll("[data-pay]").forEach(b => b.onclick = () => { pay = b.dataset.pay; root.querySelectorAll("[data-pay]").forEach(x => x.setAttribute("aria-pressed", x === b)); });
