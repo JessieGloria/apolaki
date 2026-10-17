@@ -480,7 +480,7 @@ function baseName(name) {
   return String(name)
     .replace(/^\s*size\s+(xxs|xs|s|m|l|xl|xxl)\s+/i, "")
     .replace(/\s*[-–]\s*(xxs|xs|s|m|l|xl|xxl)\s*$/i, "")
-    .replace(/\s*\(?\b(extra small|small|medium|large|extra large)\b\)?\s*$/i, "")
+    .replace(/\s*\(?\b(extra small|small|medium|large|extra large|big)\b\)?\s*$/i, "")
     .replace(/\s+/g, " ").trim();
 }
 const nice = n => /[a-z]/.test(n) ? n : n.toLowerCase().replace(/(^|[\s(\-])(\p{L})/gu, (m, a, b) => a + b.toUpperCase());
@@ -842,11 +842,107 @@ const fmtMonth = s => monthStart(s.slice(0, 7)).toLocaleDateString("en-MY", { mo
 const pct = x => x == null || !isFinite(x) ? "—" : Math.round(x * 100) + "%";
 const dec = (x, n = 1) => x == null || !isFinite(x) ? "—" : Number(x).toFixed(n);
 
+/* CLASSIFY-START
+   Product classification, per item per retailer. Review period = the last 4 complete calendar months (this month left out).
+   Sales pace = units sold ÷ days in stock × 30. Days in stock come from deliveries and the monthly sales reports only:
+   a day counts as "surely in stock" when stock was above zero even if every piece sold that month had gone before that day,
+   and "maybe in stock" when stock was above zero before that month's sales. We never guess the day an item sold out;
+   if the answer depends on it, the item is "Needs review". Sell-through and current stock are not used here. */
+const CLASS_INFO = {
+  new: { label: "New / Testing", tone: "" }, review: { label: "Needs review", tone: "brass" }, dormant: { label: "Dormant", tone: "rust" },
+  core: { label: "Core", tone: "green" }, promising: { label: "Promising", tone: "brass" }, slow: { label: "Slow-moving", tone: "rust" },
+  thin: { label: "Insufficient availability", tone: "" }, notstocked: { label: "Not stocked", tone: "" }, status: { label: "", tone: "" }
+};
+const CLASS_ORDER = ["core", "promising", "slow", "dormant", "new", "thin", "review", "notstocked", "status"];
+const dUTC = s => Date.UTC(+s.slice(0, 4), +s.slice(5, 7) - 1, +s.slice(8, 10));
+const isoUTC = t => new Date(t).toISOString().slice(0, 10);
+const addMonths = (m, n) => { const d = new Date(Date.UTC(+m.slice(0, 4), +m.slice(5, 7) - 1 + n, 1)); return d.toISOString().slice(0, 7); };
+const MON_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const monName = (m, yr) => MON_SHORT[+m.slice(5, 7) - 1] + (yr ? " " + m.slice(0, 4) : "");
+const span = ms => `${monName(ms[0])}–${monName(ms[ms.length - 1], true)}`;
+const n1 = x => (Math.floor(x * 100 + 1e-9) / 100).toFixed(2);
+
+/* opts: { status, locId, moves:[{moved_on,qty,to_location,from_location,reason}], sales:[{month:'YYYY-MM',qty}], finalMonths:Set('YYYY-MM'), today:'YYYY-MM-DD' } */
+function classifyItem(o) {
+  const cur = o.today.slice(0, 7), months = [1, 2, 3, 4].map(i => addMonths(cur, -5 + i)), last3 = months.slice(1);
+  const pStart = months[0] + "-01", pEnd = isoUTC(Date.UTC(+cur.slice(0, 4), +cur.slice(5, 7) - 1, 0));
+  const out = (key, why, extra = {}) => ({ key, label: key === "status" ? o.status : CLASS_INFO[key].label, tone: CLASS_INFO[key].tone, why, months, ...extra });
+  if (o.status && o.status !== "Active") return out("status", `${o.status} — kept out of active recommendations.`);
+  const moves = o.moves.filter(m => m.to_location === o.locId || m.from_location === o.locId);
+  const deliveries = moves.filter(m => m.to_location === o.locId && m.reason !== "correction").map(m => m.moved_on).sort();
+  const soldIn = m => o.sales.filter(s => s.month === m).reduce((t, s) => t + (s.qty || 0), 0);
+  if (!deliveries.length) return o.sales.length ? out("review", "Sales are recorded but there's no delivery on record, so stock history can't be checked.") : out("notstocked", "Never delivered to this shop.");
+  const first = deliveries[0];
+  /* 1. New / Testing: complete calendar months since the first delivery, up to the end of the review period */
+  let firstFull = first.slice(0, 7); if (first.slice(8, 10) !== "01") firstFull = addMonths(firstFull, 1);
+  const fullMonths = []; for (let m = firstFull; m <= months[3]; m = addMonths(m, 1)) fullMonths.push(m);
+  const reliable = fullMonths.filter(m => o.finalMonths.has(m));
+  if (fullMonths.length < 3) return out("new", `First delivered ${first}; only ${fullMonths.length} complete month${fullMonths.length === 1 ? "" : "s"} on the shelf by ${monName(months[3], true)} (needs 3).`);
+  if (reliable.length < 3) return out("review", `Only ${reliable.length} of ${fullMonths.length} complete months since the first delivery have a final sales report.`);
+  /* missing reports in the review period: never treated as zero sales */
+  const missing = months.filter(m => m >= first.slice(0, 7) && !o.finalMonths.has(m));
+  if (missing.length) return out("review", `No final sales report for ${missing.map(m => monName(m, true)).join(", ")} — can't assume nothing sold.`);
+  /* 2. rebuild stock day by day through the review period */
+  const net = d => moves.filter(m => m.moved_on <= d).reduce((t, m) => t + (m.to_location === o.locId ? m.qty : -m.qty), 0);
+  const soldBefore = m => o.sales.filter(s => s.month < m).reduce((t, s) => t + (s.qty || 0), 0);
+  let sure = 0, maybe = 0, sure3 = 0, maybe3 = 0;
+  const per = {};
+  for (const m of months) {
+    const sold = soldIn(m), base = soldBefore(m);
+    const endLevel = net(isoUTC(Date.UTC(+m.slice(0, 4), +m.slice(5, 7), 0))) - base - sold;
+    if (endLevel < 0) return out("review", `Records give ${endLevel} pieces at the end of ${monName(m, true)} — a delivery or sale is probably missing or mis-dated.`);
+    let s = 0, mb = 0;
+    for (let t = dUTC(m + "-01"); isoUTC(t).slice(0, 7) === m; t += 864e5) {
+      const up = net(isoUTC(t)) - base;
+      if (up - sold > 0) s++;
+      if (up > 0) mb++;
+    }
+    per[m] = { sold, sure: s, maybe: mb, end: endLevel };
+    sure += s; maybe += mb; if (last3.includes(m)) { sure3 += s; maybe3 += mb; }
+  }
+  const units = months.reduce((t, m) => t + per[m].sold, 0), units3 = last3.reduce((t, m) => t + per[m].sold, 0);
+  const salesMonths = months.filter(m => per[m].sold > 0).length;
+  const facts = { units, salesMonths, daysSure: sure, daysMaybe: maybe, per, first };
+  /* 3. Dormant: nothing sold in the last 3 complete months despite 60+ days in stock (no sales → no doubt about stock days) */
+  if (units3 === 0 && sure3 >= 60) return out("dormant", `No sales in ${span(last3)} although it was in stock ${sure3} days.`, { ...facts });
+  /* 4–6, worked out with the surest and the widest count of days in stock */
+  const judge = days => {
+    if (days < 60) return { key: "thin" };
+    const pace = units / days * 30;
+    return { key: salesMonths >= 3 && pace >= 2 ? "core" : pace >= 1 ? "promising" : "slow", pace };
+  };
+  const a = judge(sure), b = judge(maybe);
+  const daysTxt = sure === maybe ? `${sure} days in stock` : `${sure}–${maybe} days in stock (sold-out date unknown)`;
+  const paceTxt = a.pace != null && b.pace != null && Math.abs(a.pace - b.pace) >= 0.05 ? `${n1(b.pace)}–${n1(a.pace)}` : n1((b.pace ?? a.pace) || 0);
+  const base = `${span(months)}: ${units} sold, ${daysTxt}`;
+  if (a.key !== b.key) return out("review", `${base}. The class depends on when it sold out, which the monthly reports don't show (${CLASS_INFO[b.key].label} → ${CLASS_INFO[a.key].label}).`, { ...facts, pace: b.pace ?? null, paceHi: a.pace ?? null });
+  if (b.key === "thin") return out("thin", `${base} — needs at least 60 days in stock to judge.`, facts);
+  const tail = b.key === "core" ? `, sold in ${salesMonths} of 4 months` : b.key === "promising" && salesMonths < 3 ? `, but sold in only ${salesMonths} of 4 months` : "";
+  return out(b.key, `${base} → ${paceTxt} a month${tail}.`, { ...facts, pace: b.pace, paceHi: a.pace });
+}
+/* CLASSIFY-END */
+
 /* per-item numbers, same idea as the sheet's Product Analysis (with the fixes you asked for) */
 function analyseRetailer(r, d) {
   const rate = Number(r.commission_rate) || 0, today = new Date(), curM = ym(today);
   const skus = new Set([...state.codes.filter(c => c.location_id === r.id).map(c => c.sku), ...d.sales.map(s => s.sku), ...d.moves.map(m => m.sku)].filter(Boolean));
   const items = [];
+  /* months with a final (whole-month) sales report: a final payout, or report lines not marked mid-month */
+  const finalMonths = new Set([...(d.pays || []).filter(x => x.report_stage !== "mid").map(x => x.period_month.slice(0, 7)),
+    ...d.sales.filter(s => s.report_id && s.notes !== "Mid-month report").map(s => (s.sale_month || s.sold_at).slice(0, 7))]);
+  const todayIso = ymd(today);
+  /* sizes of one design count as one item for classification (same grouping as the Sell tab) */
+  const groupOf = {};
+  for (const g of sizeGroups([...skus].map(prod).filter(Boolean), r.id)) {
+    const ps = g.items.map(it => it.p), set = new Set(ps.map(p => p.sku));
+    const status = ps.some(p => p.status === "Active") ? "Active" : ["Paused", "Replaced", "Discontinued"].find(x => ps.some(p => p.status === x)) || ps[0].status;
+    const c = classifyItem({ status, locId: r.id, today: todayIso, finalMonths, moves: d.moves.filter(m => set.has(m.sku)),
+      sales: d.sales.filter(s => set.has(s.sku)).map(s => ({ month: (s.sale_month || s.sold_at).slice(0, 7), qty: s.qty || 0 })) });
+    const sizes = g.items.map(it => it.size).filter(Boolean);
+    if (ps.length > 1 && c.key !== "status") c.why = `All sizes together (${sizes.join(", ")}). ${c.why}`;
+    const info = { key: g.key, name: g.name, skus: ps.map(p => p.sku), sizes, cls: c };
+    g.items.forEach(it => groupOf[it.p.sku] = { ...info, size: it.size });
+  }
   for (const sku of skus) {
     const p = prod(sku); if (!p) continue;
     const ins = d.moves.filter(m => m.sku === sku && m.to_location === r.id && (m.reason === "restock" || m.reason === "transfer"));
@@ -868,12 +964,9 @@ function analyseRetailer(r, d) {
     const st = sold + current > 0 ? sold / (sold + current) : null;
     const restocks = new Set(ins.map(m => m.ref || m.moved_on)).size;
     const stage = !first ? "Not stocked" : monthsAvail < 2 ? "Too New" : monthsAvail < 4 ? "New" : "Mature";
-    let role;
-    if (p.status !== "Active") role = "Non-Core";
-    else if (stage === "Too New") role = "Too New";
-    else if (velocity >= 2 && (st ?? 0) >= 0.6) role = "Core";
-    else if (velocity >= 1 || (st ?? 0) >= 0.5) role = "Promising";
-    else role = "Weak";
+    const group = groupOf[sku] || { key: "sku|" + sku, name: p.name, skus: [sku], sizes: [], size: "" };
+    /* a size that is paused/replaced/discontinued keeps its own status; otherwise it carries its design's class */
+    const cls = p.status !== "Active" || !group.cls ? classifyItem({ status: p.status, locId: r.id, today: todayIso, finalMonths, moves: [], sales: [] }) : group.cls;
     const movement = !sold ? "Never Sold" : sinceLast >= 3 ? "Dormant" : sinceLast <= 1 ? "Moving" : "Slowing";
     const stockStatus = current <= 0 ? (sold ? "Sold Out" : "No Stock") : !sold ? "No Sales Yet" : cover < 1 ? "Low" : cover > 6 ? "Overstocked" : "Healthy";
     let action;
@@ -885,18 +978,19 @@ function analyseRetailer(r, d) {
     else if (cover != null && cover < 1) action = "Priority Restock";
     else if (cover != null && cover < 2) action = "Restock Small Batch";
     else if (monthsAvail >= 3 && (movement === "Dormant" || movement === "Never Sold")) action = "Review Design";
-    else if (role === "Weak") action = "Monitor Product";
+    else if (cls.key === "slow") action = "Monitor Product";
     else action = "Hold Restock";
+    if (action === "Review Design" && group.skus.length > 1) action = "Review Size";   /* one size not selling; the design is judged as a whole */
     items.push({ p, sku, code: codeAt(r.id, sku), stockIn, sold, actual, gross, net: actual * (1 - rate), current, value: current * price, price,
-      first, monthsAvail, firstSale, lastSale, sinceLast, velocity, cover, st, restocks, stage, role, movement, stockStatus, action,
+      first, monthsAvail, firstSale, lastSale, sinceLast, velocity, cover, st, restocks, stage, cls, group, movement, stockStatus, action,
       realisation: gross ? actual / gross : null });
   }
   items.sort((a, b) => String(a.code || "~" + a.p.name).localeCompare(String(b.code || "~" + b.p.name)));
   return items;
 }
 
-const ACTION_TONE = { "Priority Restock": "rust", "Restock Small Batch": "brass", "Clear Remaining Stock": "brass", "Review Design": "brass", "Use Replacement": "", "Hold - Paused": "", "Retired": "", "Monitor New Product": "green", "Monitor Product": "", "Hold Restock": "green" };
-const ROLE_TONE = { Core: "green", Promising: "brass", "Too New": "", Weak: "rust", "Non-Core": "" };
+const ACTION_TONE = { "Priority Restock": "rust", "Restock Small Batch": "brass", "Clear Remaining Stock": "brass", "Review Design": "brass", "Review Size": "brass", "Use Replacement": "", "Hold - Paused": "", "Retired": "", "Monitor New Product": "green", "Monitor Product": "", "Hold Restock": "green" };
+const clsTag = i => tag(i.cls.label, i.cls.tone);
 const tag = (t, tone) => `<span class="tag ${tone || ""}">${esc(t)}</span>`;
 const codeChip = it => it.code ? `<span class="code">${esc(it.code)}</span>` : `<span class="code none">No code</span>`;
 
@@ -959,7 +1053,7 @@ function rDashboard(r, d, items) {
   const months = Array.from({ length: 12 }, (_, i) => `${year}-${pad(i + 1)}`);
   const maxA = Math.max(1, ...months.map(m => byM[m]?.a || 0));
   const counts = {}; items.forEach(i => counts[i.action] = (counts[i.action] || 0) + 1);
-  const order = ["Priority Restock", "Restock Small Batch", "Hold Restock", "Monitor New Product", "Monitor Product", "Review Design", "Clear Remaining Stock", "Hold - Paused", "Use Replacement", "Retired"];
+  const order = ["Priority Restock", "Restock Small Batch", "Hold Restock", "Monitor New Product", "Monitor Product", "Review Design", "Review Size", "Clear Remaining Stock", "Hold - Paused", "Use Replacement", "Retired"];
   const topU = items.filter(i => i.sold).sort((a, b) => b.sold - a.sold).slice(0, 10);
   const topA = items.filter(i => i.actual).sort((a, b) => b.actual - a.actual).slice(0, 10);
   const top5 = actual ? topA.slice(0, 5).reduce((t, i) => t + i.actual, 0) / actual : 0;
@@ -985,7 +1079,7 @@ function rDashboard(r, d, items) {
     ${order.filter(a => counts[a]).map(a => { const list = items.filter(i => i.action === a).sort((x, y) => (x.cover ?? 99) - (y.cover ?? 99) || y.sold - x.sold); return `
     <details class="group" data-key="act:${esc(a)}"><summary>${tag(a, ACTION_TONE[a])}<span class="grow"></span><span class="count">${counts[a]}</span>${CHEV}</summary>
       <div class="inner">${list.map(i => `<div class="row" data-item="${i.sku}"><div class="grow"><div class="title" style="white-space:normal">${esc(i.p.name)}</div>
-        <div class="small muted">${codeChip(i)} Stock ${i.current} · Sold ${i.sold} · ${dec(i.velocity)}/mo${i.cover != null ? ` · ${dec(i.cover)} mo cover` : ""}</div></div>${tag(i.role, ROLE_TONE[i.role])}</div>`).join("")}</div>
+        <div class="small muted">${codeChip(i)} Stock ${i.current} · Sold ${i.sold} · ${dec(i.velocity)}/mo${i.cover != null ? ` · ${dec(i.cover)} mo cover` : ""}</div></div>${clsTag(i)}</div>`).join("")}</div>
     </details>`; }).join("")}
     <h2>Top 10 · units sold</h2>
     <div class="card scroll-x"><table class="simple"><tr><th>Item</th><th class="r">Units</th><th class="r">Sold/mo</th><th class="r">Sell-through</th></tr>
@@ -1062,20 +1156,40 @@ function rSales(r, d) {
 
 function rAnalysis(r, d, items) {
   const f = state.rFilter;
-  const roles = ["Core", "Promising", "Too New", "Weak", "Non-Core"];
-  const list = items.filter(i => !f || i.role === f).sort((a, b) => roles.indexOf(a.role) - roles.indexOf(b.role) || b.sold - a.sold);
+  /* one entry per design; sizes are listed inside it */
+  const designs = [];
+  for (const i of items) {
+    let g = designs.find(x => x.key === i.group.key);
+    if (!g) designs.push(g = { key: i.group.key, name: i.group.name, cls: i.group.cls || i.cls, items: [] });
+    g.items.push(i);
+  }
+  designs.forEach(g => { g.items.sort((a, b) => SIZE_ORDER.indexOf(a.group.size) - SIZE_ORDER.indexOf(b.group.size)); g.sold = g.items.reduce((t, i) => t + i.sold, 0); g.current = g.items.reduce((t, i) => t + i.current, 0);
+    g.lastSale = g.items.map(i => i.lastSale).filter(Boolean).sort().pop() || null; g.first = g.items.map(i => i.first).filter(Boolean).sort()[0] || null; });
+  const labels = [...CLASS_ORDER.filter(k => k !== "status").map(k => CLASS_INFO[k].label), "Paused", "Replaced", "Discontinued"];
+  const known = [...new Set([...labels, ...designs.map(g => g.cls.label)])];
+  const list = designs.filter(g => !f || g.cls.label === f).sort((a, b) => known.indexOf(a.cls.label) - known.indexOf(b.cls.label) || (b.cls.pace ?? -1) - (a.cls.pace ?? -1) || b.sold - a.sold);
+  const months = designs[0]?.cls.months || [];
+  const paceTxt = c => c.pace == null ? "—" : c.paceHi != null && Math.abs(c.paceHi - c.pace) >= 0.01 ? `${n1(c.pace)}–${n1(c.paceHi)}` : n1(c.pace);
   return `
-    <p class="small muted" style="margin:0 2px 10px">Sold/mo = units sold ÷ full months on the shelf (at least 1), so new items aren't inflated. Cover = months of stock left at that pace.</p>
-    <div class="chips" style="margin-top:0"><button class="chip" data-f="all" aria-pressed="${!f}">All · ${items.length}</button>${roles.map(k => { const n = items.filter(i => i.role === k).length; return n ? `<button class="chip" data-f="${k}" aria-pressed="${f === k}">${k} · ${n}</button>` : ""; }).join("")}</div>
-    <div class="list">${list.map(i => `<div class="row" data-item="${i.sku}" style="display:block">
-      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start"><div class="title" style="white-space:normal">${esc(i.p.name)}</div>${tag(i.role, ROLE_TONE[i.role])}</div>
-      <div class="small muted" style="margin:3px 0 8px">${codeChip(i)} ${esc(i.p.family || "")} · ${i.stage}${i.first ? ` · on shelf ${dec(i.monthsAvail)} mo` : ""}</div>
+    <p class="small muted" style="margin:0 2px 10px">Classified per design for ${esc(r.name)} using ${months.length ? `${monName(months[0])}–${monName(months[3], true)}` : "the last 4 complete months"} (this month left out); sizes of one design count together.
+      Pace = units sold ÷ days in stock × 30. Core: sold in 3+ of the 4 months and 2+ a month. Promising: 1+ a month. Slow-moving: under 1 a month.
+      Dormant: nothing sold in the last 3 months despite 60+ days in stock. Needs 60+ days in stock to judge; missing reports or unclear stock history show as Needs review.
+      Stock labels and restock advice are per size and don't change the class.</p>
+    <div class="chips" style="margin-top:0"><button class="chip" data-f="all" aria-pressed="${!f}">All · ${designs.length}</button>${known.map(k => { const n = designs.filter(g => g.cls.label === k).length; return n ? `<button class="chip" data-f="${esc(k)}" aria-pressed="${f === k}">${esc(k)} · ${n}</button>` : ""; }).join("")}</div>
+    <div class="list">${list.map(g => { const one = g.items.length === 1 ? g.items[0] : null; return `<div class="row" ${one ? `data-item="${one.sku}"` : ""} style="display:block">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start"><div class="title" style="white-space:normal">${esc(one ? one.p.name : g.name)}</div>${tag(g.cls.label, g.cls.tone)}</div>
+      <div class="small muted" style="margin:3px 0 4px">${one ? `${codeChip(one)} ${esc(one.p.family || "")}` : `${g.items.length} sizes`}${g.first ? ` · first delivered ${shortDate(g.first)} ${g.first.slice(0, 4)}` : ""}</div>
+      <div class="small" style="margin:0 0 8px;line-height:1.45">${esc(g.cls.why)}</div>
       <div class="mini-grid">
-        <div><span>Sold</span><b>${i.sold}</b></div><div><span>Stock</span><b>${i.current}</b></div><div><span>Sold/mo</span><b>${dec(i.velocity)}</b></div>
-        <div><span>Cover</span><b>${i.cover == null ? "—" : dec(i.cover)}</b></div><div><span>Sell-through</span><b>${pct(i.st)}</b></div><div><span>Last sale</span><b>${i.lastSale ? monthStart(i.lastSale).toLocaleDateString("en-MY", { month: "short", year: "2-digit" }) : "—"}</b></div>
+        <div><span>Pace/mo</span><b>${paceTxt(g.cls)}</b></div><div><span>Sold (4 mo)</span><b>${g.cls.units ?? "—"}</b></div><div><span>Days in stock</span><b>${g.cls.daysSure == null ? "—" : g.cls.daysSure === g.cls.daysMaybe ? g.cls.daysSure : `${g.cls.daysSure}–${g.cls.daysMaybe}`}</b></div>
+        <div><span>Stock now</span><b>${g.current}</b></div><div><span>Sold (all)</span><b>${g.sold}</b></div><div><span>Last sale</span><b>${g.lastSale ? monthStart(g.lastSale).toLocaleDateString("en-MY", { month: "short", year: "2-digit" }) : "—"}</b></div>
       </div>
-      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${tag(i.action, ACTION_TONE[i.action])}${tag(i.movement)}${tag(i.stockStatus)}</div>
-    </div>`).join("")}</div>`;
+      <div class="small muted" style="margin-top:8px">Stock &amp; restock${one ? "" : " by size"} (separate)</div>
+      ${one ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">${tag(one.action, ACTION_TONE[one.action])}${tag(one.stockStatus)}</div>` :
+        `<div class="list tight" style="margin-top:4px">${g.items.map(i => `<div class="row" data-item="${i.sku}"><div class="grow"><div class="title small">${esc(i.group.size || i.p.size || "")} ${codeChip(i)}</div>
+          <div class="small muted">Stock ${i.current} · Sold ${i.sold}${i.p.status !== "Active" ? ` · ${esc(i.p.status)}` : ""}</div></div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">${tag(i.action, ACTION_TONE[i.action])}${tag(i.stockStatus)}</div></div>`).join("")}</div>`}
+    </div>`; }).join("")}</div>`;
 }
 
 /* tap an item on a retailer page: its numbers + set the shop's code */
@@ -1095,7 +1209,8 @@ function itemAtRetailerSheet(r, it) {
       <div class="figure"><div class="label">Stock in</div><div class="value">${it.stockIn}</div></div>
       <div class="figure"><div class="label">Actual sales</div><div class="value">${RM(it.actual)}</div></div>
     </div>
-    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">${tag(it.role, ROLE_TONE[it.role])}${tag(it.action, ACTION_TONE[it.action])}${tag(it.stockStatus)}</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">${clsTag(it)}${tag(it.action, ACTION_TONE[it.action])}${tag(it.stockStatus)}</div>
+    <p class="small muted" style="margin:-6px 2px 14px">${esc(it.cls.why)}</p>
     <div class="btns"><button class="btn" id="adj">Fix count</button><button class="btn" id="edit">Edit item</button></div>`, root => {
     root.querySelector("#cf").onsubmit = async e => {
       e.preventDefault();
