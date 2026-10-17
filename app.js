@@ -1511,22 +1511,60 @@ function readReport(lines, r, mode) {
   return out;
 }
 /* shared top part: choose a PDF or paste text */
-const sourcePicker = hint => `
+const sourcePicker = () => `
   <div class="src-pick">
     <label class="btn primary">Upload PDF<input type="file" accept="application/pdf,.pdf" id="pdfIn" hidden></label>
-    <button type="button" class="btn" id="pasteToggle">Paste text instead</button>
+    <button type="button" class="btn" id="tapToggle">Tap items</button>
   </div>
-  <div id="pasteBox" hidden><label class="field"><span>${hint}</span><textarea id="txt"></textarea></label><button type="button" class="btn block" id="readTxt">Read pasted text</button></div>
+  <div id="tapBox" hidden></div>
   <div id="readStatus" class="small muted" style="margin:6px 2px"></div>`;
 function bindSource(root, onLines) {
-  root.querySelector("#pasteToggle").onclick = () => { root.querySelector("#pasteBox").hidden = false; };
-  root.querySelector("#readTxt").onclick = () => onLines(root.querySelector("#txt").value.split(/\r?\n/), "pasted text");
   root.querySelector("#pdfIn").onchange = async e => {
     const f = e.target.files[0]; if (!f) return;
     root.querySelector("#readStatus").textContent = `Reading ${f.name}…`;
     try { onLines(await pdfLines(f), f.name); } catch (err) { root.querySelector("#readStatus").textContent = ""; fail(err); }
     e.target.value = "";
   };
+}
+/* tap items: picture tiles like the Sell tab, for a shop's sales or stock count. picked = { sku: qty } */
+function tapPicker(root, r, picked, onChange, hint) {
+  let openKey = null;
+  const tapPic = p => { const img = photo(p); return img ? `<img src="${img}" alt="" loading="lazy">` : `<div class="ph ${catG(p.category)}"></div>`; };
+  const stepper = (sku, n) => `<span class="stepper"><button type="button" data-tdec="${sku}" aria-label="One fewer">−</button><b>${n}</b><button type="button" data-tinc="${sku}" aria-label="One more">+</button></span>`;
+  const redraw = () => {
+    const box = root.querySelector("#tapBox"); if (box.hidden) return;
+    const term = (box.querySelector("#tapFlt")?.value || "").toLowerCase();
+    /* items this shop has or has a code for come first; sizes the shop doesn't separate act as one tile */
+    const pool = state.products.filter(p => p.status === "Active" || stockAt(r.id, p.sku) > 0 || codeAt(r.id, p.sku));
+    const groups = sizeGroups(pool.filter(p => !term || p.name.toLowerCase().includes(term) || (codeAt(r.id, p.sku) || "").toLowerCase().includes(term)), r.id)
+      .sort((a, b) => (b.left > 0) - (a.left > 0) || !!codeAt(r.id, b.items[0].p.sku) - !!codeAt(r.id, a.items[0].p.sku) || a.name.localeCompare(b.name));
+    const tile = g => {
+      const lead = g.items[0].p, shared = sharedSkus(r.id, lead.sku).length > 1;
+      const n = g.items.reduce((t, it) => t + (picked[it.p.sku] || 0), 0);
+      if (g.items.length === 1 || shared) return `<div class="tile ${n ? "in-cart" : ""} ${g.left <= 0 ? "out" : ""}" data-tadd="${lead.sku}" role="button" tabindex="0">${tapPic(lead)}${n ? `<span class="count">${n}</span>` : ""}
+        <div class="name">${esc(g.name)}</div><div class="meta">${RM(shopPrice(r.id, lead.sku))} · ${g.left} at shop${shared ? " · all sizes" : ""}</div>${n ? stepper(lead.sku, n) : ""}</div>`;
+      return `<div class="tile group-tile ${n || openKey === g.key ? "in-cart" : ""} ${g.left <= 0 ? "out" : ""}" data-tgroup="${esc(g.key)}" role="button" tabindex="0">${tapPic(lead)}${n ? `<span class="count">${n}</span>` : ""}
+        <div class="name">${esc(g.name)}</div><div class="meta">${RM(shopPrice(r.id, lead.sku))} · ${g.left} at shop</div>
+        <div class="size-chips">${g.items.map(it => `<span class="${it.left > 0 ? "" : "none"}">${esc(it.size)}</span>`).join("")}</div></div>
+        ${openKey === g.key ? `<div class="sizes"><div class="sizes-head"><b>Choose size</b><button type="button" class="link" data-tclose="1">Done</button></div>
+          ${g.items.map(it => `<div class="size-row"><span class="size-name">${esc(it.size)}</span><span class="size-meta">${RM(shopPrice(r.id, it.p.sku))} · ${it.left} at shop</span>${stepper(it.p.sku, picked[it.p.sku] || 0)}</div>`).join("")}</div>` : ""}`;
+    };
+    const pcs = Object.values(picked).reduce((t, n) => t + n, 0);
+    box.querySelector("#tapGrid").innerHTML = groups.length ? `<div class="grid sm">${groups.map(tile).join("")}</div>` : `<div class="empty">No items match.</div>`;
+    box.querySelector("#tapCount").textContent = hint(pcs);
+    const bump = (sku, d) => { picked[sku] = Math.max(0, (picked[sku] || 0) + d); onChange(); redraw(); };
+    box.querySelectorAll("[data-tadd]").forEach(t => t.onclick = e => { if (e.target.closest(".stepper")) return; bump(t.dataset.tadd, 1); });
+    box.querySelectorAll("[data-tgroup]").forEach(t => t.onclick = () => { openKey = openKey === t.dataset.tgroup ? null : t.dataset.tgroup; redraw(); });
+    box.querySelectorAll("[data-tinc]").forEach(b => b.onclick = e => { e.stopPropagation(); bump(b.dataset.tinc, 1); });
+    box.querySelectorAll("[data-tdec]").forEach(b => b.onclick = e => { e.stopPropagation(); bump(b.dataset.tdec, -1); });
+    const c = box.querySelector("[data-tclose]"); if (c) c.onclick = e => { e.stopPropagation(); openKey = null; redraw(); };
+  };
+  root.querySelector("#tapToggle").onclick = () => {
+    const box = root.querySelector("#tapBox"); box.hidden = false; root.querySelector("#tapToggle").hidden = true;
+    box.innerHTML = `<input class="search" id="tapFlt" type="search" placeholder="Search pieces${usesCodes(r) ? " or codes" : ""}"><div class="small muted" id="tapCount" style="margin:2px 2px 8px"></div><div id="tapGrid"></div>`;
+    box.querySelector("#tapFlt").oninput = redraw; redraw();
+  };
+  return { redraw };
 }
 const itemSelect = (r, sel) => `<select data-fix>${'<option value="">Which item is this?</option>'}${activeProducts().concat(state.products.filter(p => p.status !== "Active")).map(p => `<option value="${p.sku}" ${sel === p.sku ? "selected" : ""}>${esc(nice(p.name))}</option>`).join("")}</select>`;
 
@@ -1541,9 +1579,7 @@ function pasteSalesSheet(r) {
     <label class="field"><span>Sales month</span><input id="mon" type="month" value="${def.mon}"></label>
     <div class="chips" id="stage"><button type="button" class="chip" data-stage="mid" aria-pressed="${def.stage === "mid"}">Mid-month report</button><button type="button" class="chip" data-stage="final" aria-pressed="${def.stage === "final"}">End of month (final)</button></div>
     <p class="small muted" style="margin:-4px 2px 12px">The end-of-month report covers the whole month, so it replaces the mid-month one.</p>
-    ${sourcePicker(`Paste one line per item: ${esc(r.name)} code, quantity, amount`)}
-    <button type="button" class="btn block" id="tapToggle" style="margin:-2px 0 8px">Tap items instead (pictures)</button>
-    <div id="tapBox" hidden></div>
+    ${sourcePicker()}
     <div id="out"></div>`, root => {
     let stage = def.stage, repTo = null;
     const picked = {};   /* tapped pieces: sku -> qty */
@@ -1559,7 +1595,7 @@ function pasteSalesSheet(r) {
       root.querySelector("#readStatus").textContent = lines.length ? `Read ${lines.length} item${lines.length > 1 ? "s" : ""} from ${src}. Check the numbers, then save.` : (src ? `No ${r.name} codes found in ${src}.` : "");
       root.querySelector("#out").innerHTML = !lines.length ? "" : `
         ${bad.length ? `<div class="warn-banner">${bad.length} code${bad.length > 1 ? "s" : ""} not in the ${esc(r.name)} list. Pick the item so it's counted, or leave it to skip.</div>` : ""}
-        <div class="list tight">${lines.map((l, i) => `<div class="row edit-row" data-i="${i}"><div class="grow"><div class="title" style="white-space:normal">${l.sku ? (sharedSkus(r.id, l.sku).length > 1 ? `${esc(nice(baseName(prod(l.sku).name)))} (all sizes)` : esc(nice(prod(l.sku).name))) : itemSelect(r, null)}</div><div class="small muted">${esc(l.code)}${l.sku ? ` · ${RM(shopPrice(r.id, l.sku))} each` : ""}${l.sku && sharedSkus(r.id, l.sku).length > 1 ? " · all sizes together" : ""}</div></div>
+        <div class="list tight">${lines.map((l, i) => `<div class="row edit-row" data-i="${i}"><div class="grow"><div class="title" style="white-space:normal">${l.sku ? (sharedSkus(r.id, l.sku).length > 1 ? `${esc(nice(baseName(prod(l.sku).name)))} (all sizes)` : esc(nice(prod(l.sku).name))) : itemSelect(r, null)}</div><div class="small muted">${[l.code ? esc(l.code) : "", l.sku ? `${RM(shopPrice(r.id, l.sku))} each` : "", l.sku && sharedSkus(r.id, l.sku).length > 1 ? "all sizes together" : ""].filter(Boolean).join(" · ")}</div></div>
           <input class="mini-num" data-k="qty" type="number" inputmode="numeric" value="${l.qty}" aria-label="Quantity"><input class="mini-num wide" data-k="amount" type="number" step="0.01" inputmode="decimal" value="${l.amount ?? ""}" aria-label="Amount"></div>`).join("")}</div>
         <div class="card" style="margin-top:12px"><table class="simple">
           <tr><td>${pcs} pieces sold</td><td class="r"><strong>${RM(total)}</strong></td></tr>
@@ -1595,10 +1631,7 @@ function pasteSalesSheet(r) {
         } catch (e) { fail(e); }
       };
     };
-    /* ---- tap items: picture tiles like the Sell tab ---- */
-    let openKey = null;
-    const tapPic = p => { const img = photo(p); return img ? `<img src="${img}" alt="" loading="lazy">` : `<div class="ph ${catG(p.category)}"></div>`; };
-    const stepper = (sku, n) => `<span class="stepper"><button type="button" data-tdec="${sku}" aria-label="One fewer">−</button><b>${n}</b><button type="button" data-tinc="${sku}" aria-label="One more">+</button></span>`;
+    /* ---- tap items ---- */
     const syncLines = () => {
       for (const [sku, n] of Object.entries(picked)) {
         let l = lines.find(x => x.tapped && x.sku === sku);
@@ -1609,39 +1642,9 @@ function pasteSalesSheet(r) {
       }
       if (!src) src = "tapped items";
     };
-    const drawTap = () => {
-      const box = root.querySelector("#tapBox"); if (box.hidden) return;
-      const term = (box.querySelector("#tapFlt")?.value || "").toLowerCase();
-      /* items this shop has or has a code for come first; sizes sharing one shop code act as one tile */
-      const pool = state.products.filter(p => p.status === "Active" || stockAt(r.id, p.sku) > 0 || codeAt(r.id, p.sku));
-      const groups = sizeGroups(pool.filter(p => !term || p.name.toLowerCase().includes(term) || (codeAt(r.id, p.sku) || "").toLowerCase().includes(term)), r.id)
-        .sort((a, b) => (b.left > 0) - (a.left > 0) || !!codeAt(r.id, b.items[0].p.sku) - !!codeAt(r.id, a.items[0].p.sku) || a.name.localeCompare(b.name));
-      const tile = g => {
-        const lead = g.items[0].p, shared = sharedSkus(r.id, lead.sku).length > 1;
-        const n = g.items.reduce((t, it) => t + (picked[it.p.sku] || 0), 0);
-        if (g.items.length === 1 || shared) return `<div class="tile ${n ? "in-cart" : ""} ${g.left <= 0 ? "out" : ""}" data-tadd="${lead.sku}" role="button" tabindex="0">${tapPic(lead)}${n ? `<span class="count">${n}</span>` : ""}
-          <div class="name">${esc(g.name)}</div><div class="meta">${RM(shopPrice(r.id, lead.sku))} · ${g.left} at shop${shared ? " · all sizes" : ""}</div>${n ? stepper(lead.sku, n) : ""}</div>`;
-        return `<div class="tile group-tile ${n || openKey === g.key ? "in-cart" : ""} ${g.left <= 0 ? "out" : ""}" data-tgroup="${esc(g.key)}" role="button" tabindex="0">${tapPic(lead)}${n ? `<span class="count">${n}</span>` : ""}
-          <div class="name">${esc(g.name)}</div><div class="meta">${RM(shopPrice(r.id, lead.sku))} · ${g.left} at shop</div>
-          <div class="size-chips">${g.items.map(it => `<span class="${it.left > 0 ? "" : "none"}">${esc(it.size)}</span>`).join("")}</div></div>
-          ${openKey === g.key ? `<div class="sizes"><div class="sizes-head"><b>Choose size</b><button type="button" class="link" data-tclose="1">Done</button></div>
-            ${g.items.map(it => `<div class="size-row"><span class="size-name">${esc(it.size)}</span><span class="size-meta">${RM(shopPrice(r.id, it.p.sku))} · ${it.left} at shop</span>${stepper(it.p.sku, picked[it.p.sku] || 0)}</div>`).join("")}</div>` : ""}`;
-      };
-      const pcs = Object.values(picked).reduce((t, n) => t + n, 0);
-      box.querySelector("#tapGrid").innerHTML = `<div class="grid sm">${groups.map(tile).join("")}</div>` || `<div class="empty">No items match.</div>`;
-      box.querySelector("#tapCount").textContent = pcs ? `${pcs} piece${pcs > 1 ? "s" : ""} tapped — check the list below, change an amount for discounts, then save.` : "Tap a piece to add one. Tap again for more.";
-      const bump = (sku, d) => { picked[sku] = Math.max(0, (picked[sku] || 0) + d); syncLines(); drawTap(); draw(); };
-      box.querySelectorAll("[data-tadd]").forEach(t => t.onclick = e => { if (e.target.closest(".stepper")) return; bump(t.dataset.tadd, 1); });
-      box.querySelectorAll("[data-tgroup]").forEach(t => t.onclick = () => { openKey = openKey === t.dataset.tgroup ? null : t.dataset.tgroup; drawTap(); });
-      box.querySelectorAll("[data-tinc]").forEach(b => b.onclick = e => { e.stopPropagation(); bump(b.dataset.tinc, 1); });
-      box.querySelectorAll("[data-tdec]").forEach(b => b.onclick = e => { e.stopPropagation(); bump(b.dataset.tdec, -1); });
-      const c = box.querySelector("[data-tclose]"); if (c) c.onclick = e => { e.stopPropagation(); openKey = null; drawTap(); };
-    };
-    root.querySelector("#tapToggle").onclick = () => {
-      const box = root.querySelector("#tapBox"); box.hidden = false; root.querySelector("#tapToggle").hidden = true;
-      box.innerHTML = `<input class="search" id="tapFlt" type="search" placeholder="Search pieces or codes"><div class="small muted" id="tapCount" style="margin:2px 2px 8px"></div><div id="tapGrid"></div>`;
-      box.querySelector("#tapFlt").oninput = drawTap; drawTap();
-    };
+    const tap = tapPicker(root, r, picked, () => { syncLines(); draw(); },
+      pcs => pcs ? `${pcs} piece${pcs > 1 ? "s" : ""} tapped — check the list below, change an amount for discounts, then save.` : "Tap a piece to add one sold. Tap again for more.");
+    const drawTap = tap.redraw;
     root.querySelector("#mon").onchange = () => lines.length && draw();
     bindSource(root, (ls, name) => {
       const got = readReport(ls, r, "sales"), m = got.meta;
@@ -1661,8 +1664,9 @@ function tallySheet(r) {
   openSheet(`
     <h2>${esc(r.name)} stock report</h2>
     <label class="field"><span>Date of the shop's count</span><input id="d" type="date" value="${ymd(new Date())}"></label>
-    ${sourcePicker("Paste the shop's stock list: code and quantity per line")}
+    ${sourcePicker()}
     <div id="out"></div>`, root => {
+    const picked = {};   /* tapped count: sku -> qty */
     const draw = () => {
       /* sizes sharing one shop code are counted together */
       const keyOf = sku => sharedKey(r.id, sku);
@@ -1678,7 +1682,7 @@ function tallySheet(r) {
           <div class="list tight" style="margin-bottom:12px">${bad.map(b => `<div class="row" data-bad="${lines.indexOf(b)}"><div class="grow">${itemSelect(r, null)}<div class="small muted">${esc(b.code)} · shop count ${b.qty}</div></div></div>`).join("")}</div>` : ""}
         <div class="figures"><div class="figure"><div class="label">Shop counted</div><div class="value">${Object.values(counted).reduce((a, b) => a + b, 0)}</div></div><div class="figure"><div class="label">App says</div><div class="value">${stockTotalAt(r.id)}</div></div></div>
         ${diffs.length ? `<p class="small muted" style="margin:0 2px 10px">${diffs.length} item${diffs.length > 1 ? "s" : ""} to check. A difference can just be sales made after the sales report, so it's best to accept counts with the final end-of-month report.</p>
-          <div class="list tight">${diffs.map(d => `<label class="row diff-row"><input type="checkbox" data-acc="${d.sku}" style="width:auto;min-height:0;box-shadow:none"><div class="grow"><div class="title" style="white-space:normal">${d.sku.startsWith("g:") ? `${esc(nice(baseName(prod(members(d.sku)[0])?.name || "")))} (all sizes)` : esc(nice(prod(d.sku)?.name || d.sku))}</div><div class="small muted">${esc(codeAt(r.id, d.sku.startsWith("g:") ? d.sku.slice(2) : d.sku) || (usesCodes(r) ? "No code" : "No code needed"))} · app ${d.app} · shop ${d.shop}</div></div><span class="tag ${d.shop < d.app ? "brass" : "green"}">${d.shop > d.app ? "+" : ""}${d.shop - d.app}</span></label>`).join("")}</div>
+          <div class="list tight">${diffs.map(d => `<label class="row diff-row"><input type="checkbox" data-acc="${d.sku}" style="width:auto;min-height:0;box-shadow:none"><div class="grow"><div class="title" style="white-space:normal">${d.sku.startsWith("g:") ? `${esc(nice(baseName(prod(members(d.sku)[0])?.name || "")))} (all sizes)` : esc(nice(prod(d.sku)?.name || d.sku))}</div><div class="small muted">${[esc(codeAt(r.id, d.sku.startsWith("g:") ? d.sku.slice(2) : d.sku) || (usesCodes(r) ? "No code" : "")), `app ${d.app}`, `shop ${d.shop}`].filter(Boolean).join(" · ")}</div></div><span class="tag ${d.shop < d.app ? "brass" : "green"}">${d.shop > d.app ? "+" : ""}${d.shop - d.app}</span></label>`).join("")}</div>
           <button type="button" class="link" id="all" style="margin:10px 2px">Select all</button>`
         : `<div class="card"><h3>Everything matches</h3><p class="muted">${lines.length} items.</p></div>`}
         <button class="btn primary block" id="save" style="margin-top:8px">Save stock report${diffs.length ? " (use shop's count for ticked items)" : ""}</button>`;
@@ -1704,8 +1708,13 @@ function tallySheet(r) {
     bindSource(root, (ls, name) => {
       const got = readReport(ls, r, "stock"), m = got.meta;
       if (m.kind === "sales" || m.kind === "history") { root.querySelector("#readStatus").textContent = ""; return toast("That's a sales report. Use Sales report on the shop page."); }
-      src = name; lines = got; if (m.date) root.querySelector("#d").value = m.date; draw();
+      src = name; lines = got; if (m.date) root.querySelector("#d").value = m.date; Object.keys(picked).forEach(k => delete picked[k]); draw();
     });
+    /* tap what's on the shop's shelf; anything not tapped counts as none there */
+    tapPicker(root, r, picked, () => {
+      lines = Object.entries(picked).filter(([, n]) => n > 0).map(([sku, n]) => ({ code: codeAt(r.id, sku) || "", sku, qty: n, tapped: true }));
+      src = "tapped count"; draw();
+    }, pcs => pcs ? `${pcs} piece${pcs > 1 ? "s" : ""} counted. Anything you don't tap counts as none at the shop.` : "Tap each piece the shop has on its shelf (tap again for more).");
   });
 }
 
