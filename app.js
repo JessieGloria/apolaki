@@ -467,7 +467,7 @@ function drawHome(d, quiet) {
       ${pc("g-coral tall", "Running low", low.length, "stock", low.length ? low.slice(0, 2).map(x => x.p.name.toLowerCase().replace(/\b\w/g, c => c.toUpperCase())).join(", ") + (low.length > 2 ? "…" : "") : "All stocked", true)}
       ${pc("g-dusk", activeMarkets.length === 1 ? "Market open" : "Markets open", activeMarkets.length, "market", activeMarkets.length ? activeMarkets.map(m => m.name).join(", ") : "Tap to start one")}
     </div></div>
-    <button type="button" class="row" id="shopRow" style="width:100%;border:0;text-align:left;margin-top:14px"><div class="grow"><div class="title">Online shop orders</div><div class="small muted">${(d.shopOpen || []).length ? `${(d.shopOpen || []).length} open` : "Orders from the shop website"}</div></div>${CHEV}</button>
+    <button type="button" class="row" id="shopRow" style="width:100%;border:0;text-align:left;margin-top:14px"><div class="grow"><div class="title">Online shop orders</div><div class="small muted">${(d.shopOpen || []).length ? `${(d.shopOpen || []).length} open` : "Orders and settings for the shop website"}</div></div>${CHEV}</button>
     ${attn.length ? `<h2>Needs attention</h2><div class="card">${attn.map((a, i) => `<div class="attn" data-ai="${i}"><span class="dot" style="background:${a.c}"></span><div class="grow">${esc(a.t)}<span class="small muted">${esc(a.s)}</span></div>${CHEV}</div>`).join("")}</div>` : ""}
     <h2>Money in by month</h2>
     <div class="card">
@@ -982,27 +982,34 @@ const MON_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep"
 const monName = (m, yr) => MON_SHORT[+m.slice(5, 7) - 1] + (yr ? " " + m.slice(0, 4) : "");
 const span = ms => `${monName(ms[0])}–${monName(ms[ms.length - 1], true)}`;
 const n1 = x => (Math.floor(x * 100 + 1e-9) / 100).toFixed(2);
+/* "about 2.5 a month"; two decimals when rounding would cross a class line (0.98 must not read as 1.0) */
+const paceWords = x => { const r = Math.round(x * 10) / 10; return [1, 2].some(t => (x < t) !== (r < t)) ? n1(x) : r.toFixed(1); };
+const dayName = d => `${+d.slice(8, 10)} ${MON_SHORT[+d.slice(5, 7) - 1]} ${d.slice(0, 4)}`;
 
 /* opts: { status, locId, moves:[{moved_on,qty,to_location,from_location,reason}], sales:[{month:'YYYY-MM',qty}], finalMonths:Set('YYYY-MM'), today:'YYYY-MM-DD' } */
 function classifyItem(o) {
   const cur = o.today.slice(0, 7), months = [1, 2, 3, 4].map(i => addMonths(cur, -5 + i)), last3 = months.slice(1);
   const pStart = months[0] + "-01", pEnd = isoUTC(Date.UTC(+cur.slice(0, 4), +cur.slice(5, 7) - 1, 0));
-  const out = (key, why, extra = {}) => ({ key, label: key === "status" ? o.status : CLASS_INFO[key].label, tone: CLASS_INFO[key].tone, why, months, ...extra });
-  if (o.status && o.status !== "Active") return out("status", `${o.status} — kept out of active recommendations.`);
+  /* why = what the numbers say, in plain words; next = what to do about it */
+  const out = (key, why, next, extra = {}) => ({ key, label: key === "status" ? o.status : (extra.likely ? "Likely " : "") + CLASS_INFO[key].label, tone: CLASS_INFO[key].tone, why, next, months, ...extra });
+  if (o.status && o.status !== "Active") return out("status", `This item is ${o.status.toLowerCase()}.`,
+    o.status === "Paused" ? "Don't restock while it's paused." : o.status === "Replaced" ? "Sell what's left, then send the new version instead." : "Don't restock. Sell what's left or take it back.");
   const moves = o.moves.filter(m => m.to_location === o.locId || m.from_location === o.locId);
   const deliveries = moves.filter(m => m.to_location === o.locId && m.reason !== "correction").map(m => m.moved_on).sort();
   const soldIn = m => o.sales.filter(s => s.month === m).reduce((t, s) => t + (s.qty || 0), 0);
-  if (!deliveries.length) return o.sales.length ? out("review", "Sales are recorded but there's no delivery on record, so stock history can't be checked.") : out("notstocked", "Never delivered to this shop.");
+  if (!deliveries.length) return o.sales.length ? out("review", "There are sales for this item here, but no delivery on record.", "Add the delivery under Send stock (with the right date) so the numbers add up.") : out("notstocked", "Never sent to this shop.", "Send some if you'd like to try it here.");
   const first = deliveries[0];
   /* 1. New / Testing: complete calendar months since the first delivery, up to the end of the review period */
   let firstFull = first.slice(0, 7); if (first.slice(8, 10) !== "01") firstFull = addMonths(firstFull, 1);
   const fullMonths = []; for (let m = firstFull; m <= months[3]; m = addMonths(m, 1)) fullMonths.push(m);
   const reliable = fullMonths.filter(m => o.finalMonths.has(m));
-  if (fullMonths.length < 3) return out("new", `First delivered ${first}; only ${fullMonths.length} complete month${fullMonths.length === 1 ? "" : "s"} on the shelf by ${monName(months[3], true)} (needs 3).`);
-  if (reliable.length < 3) return out("review", `Only ${reliable.length} of ${fullMonths.length} complete months since the first delivery have a final sales report.`);
+  if (fullMonths.length < 3) { const ready = addMonths(firstFull, 3);
+    return out("new", `First sent on ${dayName(first)}, so it has only been there ${fullMonths.length ? `${fullMonths.length} full month${fullMonths.length === 1 ? "" : "s"}` : "less than a full month"}. It needs 3 full months to judge fairly.`,
+      `Give it time and keep it on the shelf. It gets a proper class from ${monName(ready, true)}.`); }
+  if (reliable.length < 3) return out("review", `Only ${reliable.length} of its ${fullMonths.length} full months have an end-of-month sales report.`, "Upload the missing end-of-month sales reports.");
   /* missing reports in the review period: never treated as zero sales */
   const missing = months.filter(m => m >= first.slice(0, 7) && !o.finalMonths.has(m));
-  if (missing.length) return out("review", `No final sales report for ${missing.map(m => monName(m, true)).join(", ")} — can't assume nothing sold.`);
+  if (missing.length) return out("review", `There's no end-of-month sales report for ${missing.map(m => monName(m, true)).join(", ")}, so we can't tell what sold.`, `Upload the ${missing.map(m => monName(m)).join(" and ")} end-of-month report.`);
   /* 2. rebuild stock day by day through the review period */
   const net = d => moves.filter(m => m.moved_on <= d).reduce((t, m) => t + (m.to_location === o.locId ? m.qty : -m.qty), 0);
   const soldBefore = m => o.sales.filter(s => s.month < m).reduce((t, s) => t + (s.qty || 0), 0);
@@ -1011,7 +1018,7 @@ function classifyItem(o) {
   for (const m of months) {
     const sold = soldIn(m), base = soldBefore(m);
     const endLevel = net(isoUTC(Date.UTC(+m.slice(0, 4), +m.slice(5, 7), 0))) - base - sold;
-    if (endLevel < 0) return out("review", `Records give ${endLevel} pieces at the end of ${monName(m, true)} — a delivery or sale is probably missing or mis-dated.`);
+    if (endLevel < 0) return out("review", `The numbers don't add up: more were sold than were sent by the end of ${monName(m, true)} (${endLevel} left).`, "Check the deliveries and their dates, or do a stock count with the shop.");
     let s = 0, mb = 0;
     for (let t = dUTC(m + "-01"); isoUTC(t).slice(0, 7) === m; t += 864e5) {
       const up = net(isoUTC(t)) - base;
@@ -1025,21 +1032,35 @@ function classifyItem(o) {
   const salesMonths = months.filter(m => per[m].sold > 0).length;
   const facts = { units, salesMonths, daysSure: sure, daysMaybe: maybe, per, first };
   /* 3. Dormant: nothing sold in the last 3 complete months despite 60+ days in stock (no sales → no doubt about stock days) */
-  if (units3 === 0 && sure3 >= 60) return out("dormant", `No sales in ${span(last3)} although it was in stock ${sure3} days.`, { ...facts });
+  if (units3 === 0 && sure3 >= 60) return out("dormant", `Nothing sold from ${span(last3)}, even though it was on the shelf for ${sure3} days.`,
+    "Don't send more. Ask the shop to move it somewhere more visible, or take some back to sell at a market. If it still doesn't sell, think about a discount or stopping it.", { ...facts });
   /* 4–6, worked out with the surest and the widest count of days in stock */
   const judge = days => {
     if (days < 60) return { key: "thin" };
     const pace = units / days * 30;
     return { key: salesMonths >= 3 && pace >= 2 ? "core" : pace >= 1 ? "promising" : "slow", pace };
   };
-  const a = judge(sure), b = judge(maybe);
-  const daysTxt = sure === maybe ? `${sure} days in stock` : `${sure}–${maybe} days in stock (sold-out date unknown)`;
-  const paceTxt = a.pace != null && b.pace != null && Math.abs(a.pace - b.pace) >= 0.05 ? `${n1(b.pace)}–${n1(a.pace)}` : n1((b.pace ?? a.pace) || 0);
-  const base = `${span(months)}: ${units} sold, ${daysTxt}`;
-  if (a.key !== b.key) return out("review", `${base}. The class depends on when it sold out, which the monthly reports don't show (${CLASS_INFO[b.key].label} → ${CLASS_INFO[a.key].label}).`, { ...facts, pace: b.pace ?? null, paceHi: a.pace ?? null });
-  if (b.key === "thin") return out("thin", `${base} — needs at least 60 days in stock to judge.`, facts);
-  const tail = b.key === "core" ? `, sold in ${salesMonths} of 4 months` : b.key === "promising" && salesMonths < 3 ? `, but sold in only ${salesMonths} of 4 months` : "";
-  return out(b.key, `${base} → ${paceTxt} a month${tail}.`, { ...facts, pace: b.pace, paceHi: a.pace });
+  const a = judge(sure), b = judge(maybe);   /* a: fewest possible days on the shelf (fastest pace); b: most days (slowest pace) */
+  const per4 = `${span(months)}: ${units} sold`;
+  const ranOut = months.filter(m => per[m].sure < per[m].maybe).map(m => monName(m));
+  const oftenOut = maybe < 100;   /* was off the shelf for weeks of the period */
+  const NEXT = {
+    core: "A best seller here. Keep it on the shelf all the time: restock before it runs out.",
+    promising: salesMonths < 3 ? "Sells well but not every month. Keep 1–2 on the shelf and see if it picks up." : "Selling steadily. Keep a few on the shelf and check again next month.",
+    slow: "Sells slowly here. Don't send more for now. Try a better spot in the shop or a post online, or sell it at a market instead."
+  };
+  if (b.key === "thin") return out("thin", `${per4}, but it was only on the shelf ${sure === maybe ? sure : `${sure}–${maybe}`} days. That's too short to judge (needs 60).`,
+    units ? "It sells, but keeps running out. Send more so it stays on the shelf, then we can judge it properly." : "Keep it on the shelf for a while so we can see how it sells.", facts);
+  if (a.key !== b.key) {
+    /* the sold-out day isn't in the reports; the slowest possible pace still gives a class, and the real one can only be the same or better */
+    return out(b.key, `${per4}. It ran out in ${ranOut.join(" and ") || "the period"} and the report doesn't say which day, so it sold at least ${paceWords(b.pace)} a month, maybe more.`,
+      (b.key === "slow" ? "It may sell better than this. Keep it on the shelf for a month without running out, then check again." : "It sells fast and ran out. Send more so it doesn't run out again."),
+      { ...facts, likely: true, pace: b.pace, paceHi: a.pace ?? null });
+  }
+  const months4 = b.key === "core" ? ` It sold in ${salesMonths} of the 4 months.` : b.key === "promising" && salesMonths < 3 ? ` But it only sold in ${salesMonths} of the 4 months.` : "";
+  const shelf = ranOut.length ? `${sure}–${maybe}` : `${maybe}`;
+  return out(b.key, `${per4} in ${shelf} days on the shelf, about ${paceWords(b.pace)} a month.${months4}`,
+    NEXT[b.key] + (oftenOut && b.key !== "slow" ? " It was off the shelf for part of this time, so send stock sooner." : ""), { ...facts, pace: b.pace, paceHi: a.pace });
 }
 /* CLASSIFY-END */
 
@@ -1060,7 +1081,7 @@ function analyseRetailer(r, d) {
     const c = classifyItem({ status, locId: r.id, today: todayIso, finalMonths, moves: d.moves.filter(m => set.has(m.sku)),
       sales: d.sales.filter(s => set.has(s.sku)).map(s => ({ month: (s.sale_month || s.sold_at).slice(0, 7), qty: s.qty || 0 })) });
     const sizes = g.items.map(it => it.size).filter(Boolean);
-    if (ps.length > 1 && c.key !== "status") c.why = `All sizes together (${sizes.join(", ")}). ${c.why}`;
+    if (ps.length > 1 && c.key !== "status") c.why = `Counting all sizes (${sizes.join(", ")}) together. ${c.why}`;
     const info = { key: g.key, name: g.name, skus: ps.map(p => p.sku), sizes, cls: c };
     g.items.forEach(it => groupOf[it.p.sku] = { ...info, size: it.size });
   }
@@ -1323,21 +1344,21 @@ function rAnalysis(r, d, items) {
   }
   designs.forEach(g => { g.items.sort((a, b) => SIZE_ORDER.indexOf(a.group.size) - SIZE_ORDER.indexOf(b.group.size)); g.sold = g.items.reduce((t, i) => t + i.sold, 0); g.current = g.items.reduce((t, i) => t + i.current, 0);
     g.lastSale = g.items.map(i => i.lastSale).filter(Boolean).sort().pop() || null; g.first = g.items.map(i => i.first).filter(Boolean).sort()[0] || null; });
-  const labels = [...CLASS_ORDER.filter(k => k !== "status").map(k => CLASS_INFO[k].label), "Paused", "Replaced", "Discontinued"];
+  const labels = [...CLASS_ORDER.filter(k => k !== "status").flatMap(k => [CLASS_INFO[k].label, "Likely " + CLASS_INFO[k].label]), "Paused", "Replaced", "Discontinued"];
   const known = [...new Set([...labels, ...designs.map(g => g.cls.label)])];
   const list = designs.filter(g => !f || g.cls.label === f).sort((a, b) => known.indexOf(a.cls.label) - known.indexOf(b.cls.label) || (b.cls.pace ?? -1) - (a.cls.pace ?? -1) || b.sold - a.sold);
   const months = designs[0]?.cls.months || [];
   const paceTxt = c => c.pace == null ? "—" : c.paceHi != null && Math.abs(c.paceHi - c.pace) >= 0.01 ? `${n1(c.pace)}–${n1(c.paceHi)}` : n1(c.pace);
   return `
-    <p class="small muted" style="margin:0 2px 10px">Classified per design for ${esc(r.name)} using ${months.length ? `${monName(months[0])}–${monName(months[3], true)}` : "the last 4 complete months"} (this month left out); sizes of one design count together.
-      Pace = units sold ÷ days in stock × 30. Core: sold in 3+ of the 4 months and 2+ a month. Promising: 1+ a month. Slow-moving: under 1 a month.
-      Dormant: nothing sold in the last 3 months despite 60+ days in stock. Needs 60+ days in stock to judge; missing reports or unclear stock history show as Needs review.
-      Stock labels and restock advice are per size and don't change the class.</p>
+    <p class="small muted" style="margin:0 2px 10px">How each design is selling at ${esc(r.name)} from ${months.length ? `${monName(months[0])} to ${monName(months[3], true)}` : "the last 4 full months"} (this month isn't finished, so it's left out). Sizes of one design count together.
+      Speed = pieces sold for every 30 days on the shelf. <b>Core</b>: 2+ a month and sells most months. <b>Promising</b>: 1+ a month. <b>Slow-moving</b>: under 1 a month. <b>Dormant</b>: nothing sold for 3 months while on the shelf.
+      <b>Likely…</b> means it ran out and the report doesn't say which day, so it may be doing even better. Each item has a <b>Next</b> step.</p>
     <div class="chips" style="margin-top:0"><button class="chip" data-f="all" aria-pressed="${!f}">All · ${designs.length}</button>${known.map(k => { const n = designs.filter(g => g.cls.label === k).length; return n ? `<button class="chip" data-f="${esc(k)}" aria-pressed="${f === k}">${esc(k)} · ${n}</button>` : ""; }).join("")}</div>
     <div class="list">${list.map(g => { const one = g.items.length === 1 ? g.items[0] : null; return `<div class="row" ${one ? `data-item="${one.sku}"` : ""} style="display:block">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start"><div class="title" style="white-space:normal">${esc(one ? one.p.name : g.name)}</div>${tag(g.cls.label, g.cls.tone)}</div>
       <div class="small muted" style="margin:3px 0 4px">${one ? `${codeChip(one)} ${esc(one.p.family || "")}` : `${g.items.length} sizes`}${g.first ? ` · first delivered ${shortDate(g.first)} ${g.first.slice(0, 4)}` : ""}</div>
-      <div class="small" style="margin:0 0 8px;line-height:1.45">${esc(g.cls.why)}</div>
+      <div class="small" style="margin:0 0 4px;line-height:1.45">${esc(g.cls.why)}</div>
+      ${g.cls.next ? `<div class="small" style="margin:0 0 8px;line-height:1.45"><b>Next:</b> ${esc(g.cls.next)}</div>` : ""}
       <div class="mini-grid">
         <div><span>Pace/mo</span><b>${paceTxt(g.cls)}</b></div><div><span>Sold (4 mo)</span><b>${g.cls.units ?? "—"}</b></div><div><span>Days in stock</span><b>${g.cls.daysSure == null ? "—" : g.cls.daysSure === g.cls.daysMaybe ? g.cls.daysSure : `${g.cls.daysSure}–${g.cls.daysMaybe}`}</b></div>
         <div><span>Stock now</span><b>${g.current}</b></div><div><span>Sold (all)</span><b>${g.sold}</b></div><div><span>Last sale</span><b>${g.lastSale ? monthStart(g.lastSale).toLocaleDateString("en-MY", { month: "short", year: "2-digit" }) : "—"}</b></div>
@@ -1373,7 +1394,8 @@ function itemAtRetailerSheet(r, it) {
       <div class="figure"><div class="label">Actual sales</div><div class="value">${RM(it.actual)}</div></div>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">${clsTag(it)}${tag(it.action, ACTION_TONE[it.action])}${tag(it.stockStatus)}</div>
-    <p class="small muted" style="margin:-6px 2px 14px">${esc(it.cls.why)}</p>
+    <p class="small muted" style="margin:-6px 2px 6px">${esc(it.cls.why)}</p>
+    ${it.cls.next ? `<p class="small" style="margin:0 2px 14px"><b>Next:</b> ${esc(it.cls.next)}</p>` : ""}
     <div class="btns"><button class="btn" id="adj">Fix count</button><button class="btn" id="edit">Edit item</button></div>`, root => {
     root.querySelector("#cf").onsubmit = async e => {
       e.preventDefault();
@@ -2088,6 +2110,7 @@ async function shopSettingsSheet() {
   openSheet(`
     <h2>Shop settings</h2>
     <p class="small muted" style="margin:-4px 2px 12px">Everything here is shown to customers on the shop website.</p>
+    ${s.shop_url ? `<a class="btn primary block" style="margin-bottom:14px" href="${esc(s.shop_url)}" target="_blank" rel="noopener">Open the shop</a>` : `<div class="warn-banner">Add the shop's web address at the bottom and save to get an <b>Open the shop</b> button here.</div>`}
     <form id="sf">
       ${f("whatsapp", "WhatsApp number for orders", s.whatsapp, 'type="tel" placeholder="012-345 6789"')}
       <div class="two">${f("bank_name", "Bank", s.bank_name, 'placeholder="Maybank"')}${f("account_name", "Account name", s.account_name)}</div>
@@ -2103,10 +2126,9 @@ async function shopSettingsSheet() {
       <div class="two">${f("r_semenanjung", "Peninsular (RM)", rates.semenanjung, 'type="number" step="0.01" min="0" inputmode="decimal"')}${f("r_sarawak", "Sarawak (RM)", rates.sarawak, 'type="number" step="0.01" min="0" inputmode="decimal"')}</div>
       <div class="two">${f("r_sabah", "Sabah (RM)", rates.sabah, 'type="number" step="0.01" min="0" inputmode="decimal"')}${f("lead_days", "Made to order ships within (days)", s.lead_days ?? 7, 'type="number" min="1" step="1" inputmode="numeric"')}</div>
       <p class="small muted">Overseas shipping is quoted per order on WhatsApp.</p>
-      ${f("shop_url", "Shop website address (optional)", s.shop_url, 'type="url" placeholder="https://apolaki-shop.vercel.app"')}
+      ${f("shop_url", "Shop website address", s.shop_url, 'type="text" inputmode="url" autocapitalize="off" placeholder="apolaki-shop.vercel.app"')}
       <button class="btn primary block">Save settings</button>
-    </form>
-    ${s.shop_url ? `<a class="btn block" style="margin-top:10px" href="${esc(s.shop_url)}" target="_blank" rel="noopener">Open the shop</a>` : ""}`, root => {
+    </form>`, root => {
     let busy = false;
     root.querySelector("#qrIn").onchange = async e => {
       const file = e.target.files && e.target.files[0]; if (!file) return;
@@ -2122,9 +2144,9 @@ async function shopSettingsSheet() {
       const v = Object.fromEntries(new FormData(e.target)); for (const k in v) v[k] = String(v[k]).trim();
       const num = x => x === "" ? null : Number(x);
       const value = { ...s, whatsapp: v.whatsapp, bank_name: v.bank_name, account_name: v.account_name, account_no: v.account_no, duitnow_qr: v.duitnow_qr,
-        lead_days: num(v.lead_days) || 7, shop_url: v.shop_url, rates: { semenanjung: num(v.r_semenanjung), sarawak: num(v.r_sarawak), sabah: num(v.r_sabah) } };
+        lead_days: num(v.lead_days) || 7, shop_url: v.shop_url && !/^https?:\/\//i.test(v.shop_url) ? "https://" + v.shop_url : v.shop_url, rates: { semenanjung: num(v.r_semenanjung), sarawak: num(v.r_sarawak), sabah: num(v.r_sabah) } };
       if (Object.values(value.rates).some(r => r == null)) return toast("Fill in all three shipping rates");
-      try { await q(sb.from("app_settings").upsert({ key: "shop", value, updated_at: new Date().toISOString() })); toast("Shop settings saved"); pageBack(); }
+      try { await q(sb.from("app_settings").upsert({ key: "shop", value, updated_at: new Date().toISOString() })); toast("Shop settings saved"); shopSettingsSheet(); }
       catch (err) { fail(err); }
     };
   });
