@@ -464,10 +464,9 @@ function drawHome(d, quiet) {
       ${pc("g-mint", `${moneyIn - spent >= 0 ? "Profit" : "Loss"} this ${period === "year" ? "year" : "month"}`, RM(Math.abs(moneyIn - spent)), "accounts", "Money in minus spent")}
     </div><div class="mcol">
       ${pc("g-sunset", "Payouts due", RM(due), "retailers", d.unpaid.length ? d.unpaid.map(u => monthStart(u.period_month.slice(0, 7)).toLocaleDateString("en-MY", { month: "short" })).join(", ") : "All paid")}
-      ${pc("g-coral tall", "Running low", low.length, "stock", low.length ? low.slice(0, 2).map(x => x.p.name.toLowerCase().replace(/\b\w/g, c => c.toUpperCase())).join(", ") + (low.length > 2 ? "…" : "") : "All stocked", true)}
+      ${pc("g-coral tall", "Online orders", (d.shopOpen || []).length, "shop", (d.shopOpen || []).length ? [shopTodo ? `${shopTodo} to make & ship` : "", shopWait ? `${shopWait} waiting for payment` : ""].filter(Boolean).join(" · ") : "No open orders", true)}
       ${pc("g-dusk", activeMarkets.length === 1 ? "Market open" : "Markets open", activeMarkets.length, "market", activeMarkets.length ? activeMarkets.map(m => m.name).join(", ") : "Tap to start one")}
     </div></div>
-    <button type="button" class="row" id="shopRow" style="width:100%;border:0;text-align:left;margin-top:14px"><div class="grow"><div class="title">Online shop orders</div><div class="small muted">${(d.shopOpen || []).length ? `${(d.shopOpen || []).length} open` : "Orders and settings for the shop website"}</div></div>${CHEV}</button>
     ${attn.length ? `<h2>Needs attention</h2><div class="card">${attn.map((a, i) => `<div class="attn" data-ai="${i}"><span class="dot" style="background:${a.c}"></span><div class="grow">${esc(a.t)}<span class="small muted">${esc(a.s)}</span></div>${CHEV}</div>`).join("")}</div>` : ""}
     <h2>Money in by month</h2>
     <div class="card">
@@ -483,9 +482,8 @@ function drawHome(d, quiet) {
     <div class="tiles">${places.map(l => { const n = stockTotalAt(l.id); return `<button class="ttile" data-place="${l.id}">${ico(placeIcon(l), placeColor(l), true)}<div class="name">${esc(l.name)}</div><div class="sub">${n} pieces</div><div class="meter"><i style="width:${pieces ? n / pieces * 100 : 0}%;background:${placeColor(l)}"></i></div><div class="sub">${pieces ? Math.round(n / pieces * 100) : 0}% of stock</div></button>`; }).join("")}</div>
     ${acts.length ? `<h2>Recent activity</h2><div class="tl">${acts.map(a => `<div class="tl-item"><span class="tl-dot"></span><div class="tl-card"><div class="tl-meta"><span class="tl-chip">${esc(a.chip)}</span><span>${ago(a.at)}</span></div><div class="tl-body"><span>${esc(a.title)}${a.sub ? `<span class="small muted" style="display:block">${esc(a.sub)}</span>` : ""}</span>${a.right ? `<strong>${a.right}</strong>` : ""}</div></div></div>`).join("")}</div>` : ""}`;
   view.querySelectorAll("[data-p]").forEach(b => b.onclick = () => { state.homePeriod = b.dataset.p; drawHome(d, true); });
-  $("#shopRow").onclick = shopOrdersSheet;
   watchShop();
-  view.querySelectorAll("[data-go]").forEach(r => r.onclick = () => go(r.dataset.go));
+  view.querySelectorAll("[data-go]").forEach(r => r.onclick = () => r.dataset.go === "shop" ? shopOrdersSheet() : go(r.dataset.go));
   view.querySelectorAll("[data-ai]").forEach(r => r.onclick = () => { const a = attn[Number(r.dataset.ai)]; if (a.go === "shop") return shopOrdersSheet(); if (a.sell) { state.sellAt = a.sell; localSet("sellAt", a.sell); } go(a.go); });
   view.querySelectorAll("[data-place]").forEach(t => t.onclick = () => { state.stockLoc = Number(t.dataset.place); go("stock"); });
 }
@@ -2111,12 +2109,13 @@ async function shopOrderPage(o, items) {
       <p class="small muted" style="margin-top:8px">${o.shipping_fee == null ? "Save the shipping fee first, then WhatsApp the customer the total. " : ""}Records the sale as an online order. Stock leaves the Workshop when you mark it shipped.</p>` : ""}
     ${["paid", "packed"].includes(o.status) ? `
       ${made.length ? `<div class="warn-banner" style="margin-top:14px">To make: ${made.map(i => `${i.qty}× ${esc(nice(i.name))}`).join(", ")}</div>` : ""}
-      ${o.status === "paid" ? `<button class="btn block" id="packed" style="margin-top:12px">Mark packed</button>` : ""}
+      ${o.status === "paid" ? `<button class="btn primary block" id="packed" style="margin-top:12px">Mark packed</button>
+        <p class="small muted" style="margin-top:8px">Pack the order first. Shipping opens after it's packed.</p>` : `
       <h3 style="margin-top:16px">Ship it</h3>
       <div class="two"><label class="field"><span>Courier</span><input id="courier" placeholder="Pos Laju, J&amp;T…" value="${esc(o.courier || "")}"></label>
         <label class="field"><span>Tracking number</span><input id="tracking" value="${esc(o.tracking || "")}"></label></div>
       <button class="btn primary block" id="shipped">Mark shipped</button>
-      <p class="small muted" style="margin-top:8px">Takes the pieces out of Workshop stock. Made-to-order pieces that were never added to stock are added and taken out together.</p>` : ""}
+      <p class="small muted" style="margin-top:8px">Takes the pieces out of Workshop stock. Made-to-order pieces that were never added to stock are added and taken out together.</p>`}` : ""}
     ${["shipped", "delivered"].includes(o.status) && o.tracking ? `<p class="small" style="margin-top:12px">Tracking: <b>${esc(o.tracking)}</b>${o.courier ? " · " + esc(o.courier) : ""}</p>` : ""}
     ${o.status === "shipped" ? `<button class="btn primary block" id="delivered" style="margin-top:14px">Mark delivered</button><p class="small muted" style="margin-top:8px">Moves the order to Completed.</p>` : ""}
     <label class="field" style="margin-top:16px"><span>Private note</span><input id="anote" value="${esc(o.admin_note || "")}" placeholder="Only you see this"></label>
