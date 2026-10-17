@@ -1959,6 +1959,8 @@ function productForm(p) {
       ${field("notes", "Notes (optional)")}
       <label class="row" style="margin:4px 0 12px;cursor:pointer"><div class="grow"><div class="title">Show on the online shop</div><div class="small muted">Customers can see and order it (needs status Active and a price)</div></div><input type="checkbox" name="show_online" ${v.show_online ? "checked" : ""} style="width:22px;height:22px;min-height:0;flex:none;padding:0;box-shadow:none;accent-color:var(--accent)"></label>
       <label class="field"><span>Shop description (optional)</span><textarea name="web_description" rows="3" style="min-height:84px;font-family:inherit;font-size:13.5px" placeholder="A line or two for customers: materials, size, how it's made">${esc(v.web_description || "")}</textarea></label>
+      <div class="two"><label class="field"><span>Material (shop)</span><input name="material" placeholder="e.g. Brass" value="${esc(v.material || "")}"></label>
+        <label class="field"><span>Dimensions (shop)</span><input name="dimensions" placeholder="e.g. Drop 4.5 cm" value="${esc(v.dimensions || "")}"></label></div>
       <p class="small muted" style="margin-top:-4px">Used at markets and online. Each shop's own price is set on that shop's page.</p>
       ${codes ? `<p class="small muted">Shops: ${codes}</p>` : ""}
       <button class="btn primary block">${p ? "Save item" : "Add item"}</button>
@@ -2172,6 +2174,10 @@ async function shopSettingsSheet() {
       <div class="two">${f("r_semenanjung", "Peninsular (RM)", rates.semenanjung, 'type="number" step="0.01" min="0" inputmode="decimal"')}${f("r_sarawak", "Sarawak (RM)", rates.sarawak, 'type="number" step="0.01" min="0" inputmode="decimal"')}</div>
       <div class="two">${f("r_sabah", "Sabah (RM)", rates.sabah, 'type="number" step="0.01" min="0" inputmode="decimal"')}${f("lead_days", "Made to order ships within (days)", s.lead_days ?? 7, 'type="number" min="1" step="1" inputmode="numeric"')}</div>
       <p class="small muted">Overseas shipping is quoted per order on WhatsApp.</p>
+      <h3 style="margin-top:16px">Website text</h3>
+      ${f("banner_title", "Homepage headline", s.banner_title, 'placeholder="Shaped by hand, made for you."')}
+      ${f("banner_text", "Homepage line under the headline", s.banner_text, 'placeholder="Bracelets, earrings and rings crafted in brass by Jason Labunda."')}
+      <label class="field"><span>Returns &amp; exchanges policy (shown on product pages)</span><textarea name="returns_text" rows="4" style="min-height:96px;font-family:inherit;font-size:13.5px" placeholder="Write your policy here. Leave empty to hide it.">${esc(s.returns_text || "")}</textarea></label>
       ${f("shop_url", "Shop website address", s.shop_url, 'type="text" inputmode="url" autocapitalize="off" placeholder="apolaki-shop.vercel.app"')}
       <button class="btn primary block">Save settings</button>
     </form>`, root => {
@@ -2190,7 +2196,7 @@ async function shopSettingsSheet() {
       const v = Object.fromEntries(new FormData(e.target)); for (const k in v) v[k] = String(v[k]).trim();
       const num = x => x === "" ? null : Number(x);
       const value = { ...s, whatsapp: v.whatsapp, bank_name: v.bank_name, account_name: v.account_name, account_no: v.account_no, duitnow_qr: v.duitnow_qr,
-        lead_days: num(v.lead_days) || 7, shop_url: v.shop_url && !/^https?:\/\//i.test(v.shop_url) ? "https://" + v.shop_url : v.shop_url, rates: { semenanjung: num(v.r_semenanjung), sarawak: num(v.r_sarawak), sabah: num(v.r_sabah) } };
+        lead_days: num(v.lead_days) || 7, banner_title: v.banner_title, banner_text: v.banner_text, returns_text: v.returns_text, shop_url: v.shop_url && !/^https?:\/\//i.test(v.shop_url) ? "https://" + v.shop_url : v.shop_url, rates: { semenanjung: num(v.r_semenanjung), sarawak: num(v.r_sarawak), sabah: num(v.r_sabah) } };
       if (Object.values(value.rates).some(r => r == null)) return toast("Fill in all three shipping rates");
       try { await q(sb.from("app_settings").upsert({ key: "shop", value, updated_at: new Date().toISOString() })); toast("Shop settings saved"); shopSettingsSheet(); }
       catch (err) { fail(err); }
