@@ -93,7 +93,20 @@ const retailers = () => state.locations.filter(l => l.type === "retailer");
 const activeProducts = () => state.products.filter(p => p.status === "Active");
 /* retailer codes: each shop's own item code (Art Attic = APO numbers). Only shown on retailer pages. */
 const codeAt = (locId, sku) => state.codes.find(c => c.location_id === Number(locId) && c.sku === sku)?.code || null;
-const skuForCode = (locId, code) => state.codes.find(c => c.location_id === Number(locId) && c.code && c.code.toUpperCase() === String(code).toUpperCase())?.sku || null;
+/* a shop may use one code for all sizes of a design; then several items share that code (smallest size first) */
+const sizeRank = sku => { const i = SIZE_ORDER.indexOf(sizeShort(prod(sku)?.size)); return i < 0 ? 99 : i; };
+const skusForCode = (locId, code) => state.codes.filter(c => c.location_id === Number(locId) && c.code && c.code.toUpperCase() === String(code).toUpperCase()).map(c => c.sku).sort((a, b) => sizeRank(a) - sizeRank(b));
+const skuForCode = (locId, code) => skusForCode(locId, code)[0] || null;
+const sharedSkus = (locId, sku) => { const c = codeAt(locId, sku); const s = c ? skusForCode(locId, c) : []; return s.length > 1 ? s : [sku]; };
+/* sizes of the same design as this item (smallest first) */
+const designSkus = sku => { const p = prod(sku); if (!p || !sizeShort(p.size)) return [sku]; const k = (p.family || "") + "|" + baseName(p.name).toLowerCase();
+  return state.products.filter(x => sizeShort(x.size) && (x.family || "") + "|" + baseName(x.name).toLowerCase() === k).map(x => x.sku).sort((a, b) => sizeRank(a) - sizeRank(b)); };
+/* pieces reported under a shared code: take from the size with the most stock at that shop first, never below zero */
+function splitShared(skus, qty, have) {
+  const left = { ...have }, out = {};
+  for (let i = 0; i < qty; i++) { const pick = skus.slice().sort((a, b) => (left[b] || 0) - (left[a] || 0))[0]; const s = (left[pick] || 0) > 0 ? pick : skus[0]; out[s] = (out[s] || 0) + 1; left[s] = (left[s] || 0) - 1; }
+  return out;
+}
 /* shop price: the retailer's own price for an item, falling back to the original price */
 const shopPrice = (locId, sku) => { const c = state.codes.find(x => x.location_id === Number(locId) && x.sku === sku); return c && c.price != null ? Number(c.price) : Number(prod(sku)?.retail_price || 0); };
 const CAT_ORDER = ["Bracelet", "Earrings", "Ring", "Neck Piece"];
@@ -1062,25 +1075,58 @@ function analyseRetailer(r, d) {
     /* a size that is paused/replaced/discontinued keeps its own status; otherwise it carries its design's class */
     const cls = p.status !== "Active" || !group.cls ? classifyItem({ status: p.status, locId: r.id, today: todayIso, finalMonths, moves: [], sales: [] }) : group.cls;
     const movement = !sold ? "Never Sold" : sinceLast >= 3 ? "Dormant" : sinceLast <= 1 ? "Moving" : "Slowing";
-    const stockStatus = current <= 0 ? (sold ? "Sold Out" : "No Stock") : !sold ? "No Sales Yet" : cover < 1 ? "Low" : cover > 6 ? "Overstocked" : "Healthy";
-    let action;
-    if (p.status === "Replaced") action = current > 0 ? "Clear Remaining Stock" : "Use Replacement";
-    else if (p.status === "Paused") action = "Hold - Paused";
-    else if (p.status === "Discontinued") action = current > 0 ? "Clear Remaining Stock" : "Retired";
-    else if (stage === "Too New") action = "Monitor New Product";
-    else if (current <= 0 && sold > 0) action = "Priority Restock";
-    else if (cover != null && cover < 1) action = "Priority Restock";
-    else if (cover != null && cover < 2) action = "Restock Small Batch";
-    else if (monthsAvail >= 3 && (movement === "Dormant" || movement === "Never Sold")) action = "Review Design";
-    else if (cls.key === "slow") action = "Monitor Product";
-    else action = "Hold Restock";
-    if (action === "Review Design" && group.skus.length > 1) action = "Review Size";   /* one size not selling; the design is judged as a whole */
+    const { stockStatus, action } = stockAdvice({ status: p.status, stage, current, sold, cover, movement, monthsAvail, slow: cls.key === "slow", oneSize: group.skus.length > 1 });
     items.push({ p, sku, code: codeAt(r.id, sku), stockIn, sold, actual, gross, net: actual * (1 - rate), current, value: current * price, price,
       first, monthsAvail, firstSale, lastSale, sinceLast, velocity, cover, st, restocks, stage, cls, group, movement, stockStatus, action,
       realisation: gross ? actual / gross : null });
   }
+  /* one shop code for all sizes: the shop can't say which size sold, so stock and advice are for the design as a whole */
+  const byCode = {};
+  items.forEach(i => { if (i.code && sharedSkus(r.id, i.sku).length > 1) (byCode[i.code.toUpperCase()] = byCode[i.code.toUpperCase()] || []).push(i); });
+  for (const [code, its] of Object.entries(byCode)) {
+    its.sort((a, b) => sizeRank(a.sku) - sizeRank(b.sku));
+    const T = k => its.reduce((t, i) => t + i[k], 0), current = T("current"), sold = T("sold");
+    const firstIn = its.map(i => i.first).filter(Boolean).sort()[0] || null, monthsAvail = Math.max(...its.map(i => i.monthsAvail));
+    const velocity = sold / Math.max(1, Math.floor(monthsAvail)), cover = velocity > 0 ? current / velocity : null;
+    const lastSale = its.map(i => i.lastSale).filter(Boolean).sort().pop() || null;
+    const sinceLast = lastSale ? (today.getFullYear() - +lastSale.slice(0, 4)) * 12 + today.getMonth() + 1 - +lastSale.slice(5, 7) : null;
+    const movement = !sold ? "Never Sold" : sinceLast >= 3 ? "Dormant" : sinceLast <= 1 ? "Moving" : "Slowing";
+    const stage = !firstIn ? "Not stocked" : monthsAvail < 2 ? "Too New" : monthsAvail < 4 ? "New" : "Mature";
+    const status = its.some(i => i.p.status === "Active") ? "Active" : its[0].p.status;
+    const adv = stockAdvice({ status, stage, current, sold, cover, movement, monthsAvail, slow: its[0].cls.key === "slow", oneSize: false });
+    const shared = { code, skus: its.map(i => i.sku), sizes: its.map(i => sizeShort(i.p.size) || i.p.size || ""), name: nice(baseName(its[0].p.name)),
+      current, sold, stockIn: T("stockIn"), value: T("value"), actual: T("actual"), velocity, cover, ...adv };
+    its.forEach(i => i.shared = shared);
+  }
   items.sort((a, b) => String(a.code || "~" + a.p.name).localeCompare(String(b.code || "~" + b.p.name)));
   return items;
+}
+function stockAdvice({ status, stage, current, sold, cover, movement, monthsAvail, slow, oneSize }) {
+  const stockStatus = current <= 0 ? (sold ? "Sold Out" : "No Stock") : !sold ? "No Sales Yet" : cover < 1 ? "Low" : cover > 6 ? "Overstocked" : "Healthy";
+  let action;
+  if (status === "Replaced") action = current > 0 ? "Clear Remaining Stock" : "Use Replacement";
+  else if (status === "Paused") action = "Hold - Paused";
+  else if (status === "Discontinued") action = current > 0 ? "Clear Remaining Stock" : "Retired";
+  else if (stage === "Too New") action = "Monitor New Product";
+  else if (current <= 0 && sold > 0) action = "Priority Restock";
+  else if (cover != null && cover < 1) action = "Priority Restock";
+  else if (cover != null && cover < 2) action = "Restock Small Batch";
+  else if (monthsAvail >= 3 && (movement === "Dormant" || movement === "Never Sold")) action = oneSize ? "Review Size" : "Review Design";   /* one size not selling; the design is judged as a whole */
+  else if (slow) action = "Monitor Product";
+  else action = "Hold Restock";
+  return { stockStatus, action };
+}
+/* for shop screens: sizes that share one shop code shown as one line with the design's totals */
+function collapseShared(items) {
+  const seen = new Set(), out = [];
+  for (const i of items) {
+    if (!i.shared) { out.push(i); continue; }
+    if (seen.has(i.shared.code)) continue; seen.add(i.shared.code);
+    const x = i.shared;
+    out.push({ ...i, sku: x.skus[0], p: { ...i.p, name: `${x.name} (all sizes)` }, current: x.current, sold: x.sold, stockIn: x.stockIn, value: x.value, actual: x.actual,
+      velocity: x.velocity, cover: x.cover, action: x.action, stockStatus: x.stockStatus, sharedRow: true });
+  }
+  return out;
 }
 
 const ACTION_TONE = { "Priority Restock": "rust", "Restock Small Batch": "brass", "Clear Remaining Stock": "brass", "Review Design": "brass", "Review Size": "brass", "Use Replacement": "", "Hold - Paused": "", "Retired": "", "Monitor New Product": "green", "Monitor Product": "", "Hold Restock": "green" };
@@ -1137,6 +1183,7 @@ async function renderRetailer() {
 }
 
 function rDashboard(r, d, items) {
+  items = collapseShared(items);
   const rate = Number(r.commission_rate) || 0;
   const actual = items.reduce((t, i) => t + i.actual, 0), units = items.reduce((t, i) => t + i.sold, 0);
   const stock = items.reduce((t, i) => t + Math.max(0, i.current), 0), value = items.reduce((t, i) => t + Math.max(0, i.value), 0);
@@ -1188,6 +1235,7 @@ function rDashboard(r, d, items) {
 }
 
 function rStock(r, d, items) {
+  items = collapseShared(items);
   const f = state.rFilter || "in";
   const list = items.filter(i => f === "all" ? true : f === "in" ? i.current > 0 : f === "nocode" ? !i.code : i.current <= 0);
   const total = items.reduce((t, i) => t + Math.max(0, i.current), 0), value = items.reduce((t, i) => t + Math.max(0, i.value), 0);
@@ -1199,7 +1247,7 @@ function rStock(r, d, items) {
     ${groupByCategory(list.map(i => i.p)).map(([cat, ps]) => { const its = ps.map(p => list.find(i => i.sku === p.sku)); const n = its.reduce((t, i) => t + Math.max(0, i.current), 0);
       return `<details class="group" data-key="rs:${esc(cat)}"><summary>${catIco(cat)}<span class="grow">${esc(cat)}<span class="small muted" style="display:block;font-weight:500">${its.length} item${its.length > 1 ? "s" : ""} · ${RM(its.reduce((t, i) => t + Math.max(0, i.value), 0))}</span></span><span class="count">${n}</span>${CHEV}</summary>
       <div class="inner">${its.map(i => `<div class="row" data-item="${i.sku}"><div class="grow"><div class="title" style="white-space:normal">${esc(i.p.name)}</div>
-      <div class="small muted">${codeChip(i)} In ${i.stockIn} · Sold ${i.sold} · ${RM(i.price)}${i.current > 0 ? ` · Value ${RM(i.value)}` : ""}</div>
+      <div class="small muted">${codeChip(i)} In ${i.stockIn} · Sold ${i.sold} · ${RM(i.price)}${i.current > 0 ? ` · Value ${RM(i.value)}` : ""}${i.sharedRow ? ` · one shop code for ${esc(i.shared.sizes.join(", "))}` : ""}</div>
       <div style="margin-top:5px">${tag(i.action, ACTION_TONE[i.action])}</div></div>
       <span class="num" style="font-size:20px;font-weight:700;${i.current <= 0 ? "color:var(--rust)" : ""}">${i.current}</span></div>`).join("")}</div></details>`; }).join("") || `<div class="empty">Nothing here.</div>`}`;
 }
@@ -1279,7 +1327,9 @@ function rAnalysis(r, d, items) {
         <div><span>Stock now</span><b>${g.current}</b></div><div><span>Sold (all)</span><b>${g.sold}</b></div><div><span>Last sale</span><b>${g.lastSale ? monthStart(g.lastSale).toLocaleDateString("en-MY", { month: "short", year: "2-digit" }) : "—"}</b></div>
       </div>
       <div class="small muted" style="margin-top:8px">Stock &amp; restock${one ? "" : " by size"} (separate)</div>
-      ${one ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">${tag(one.action, ACTION_TONE[one.action])}${tag(one.stockStatus)}</div>` :
+      ${g.items[0].shared ? `<div class="small muted" style="margin-top:4px">${esc(r.name)} uses one code (${esc(g.items[0].shared.code)}) for ${esc(g.items[0].shared.sizes.join(", "))}, so sizes aren't tracked there · stock ${g.items[0].shared.current}</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px" data-item="${g.items[0].sku}">${tag(g.items[0].shared.action, ACTION_TONE[g.items[0].shared.action])}${tag(g.items[0].shared.stockStatus)}</div>` :
+      one ? `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">${tag(one.action, ACTION_TONE[one.action])}${tag(one.stockStatus)}</div>` :
         `<div class="list tight" style="margin-top:4px">${g.items.map(i => `<div class="row" data-item="${i.sku}"><div class="grow"><div class="title small">${esc(i.group.size || i.p.size || "")} ${codeChip(i)}</div>
           <div class="small muted">Stock ${i.current} · Sold ${i.sold}${i.p.status !== "Active" ? ` · ${esc(i.p.status)}` : ""}</div></div>
           <div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end">${tag(i.action, ACTION_TONE[i.action])}${tag(i.stockStatus)}</div></div>`).join("")}</div>`}
@@ -1289,13 +1339,16 @@ function rAnalysis(r, d, items) {
 /* tap an item on a retailer page: its numbers + set the shop's code */
 function itemAtRetailerSheet(r, it) {
   if (!it) return;
-  const p = it.p;
+  const p = it.p, sizes = designSkus(p.sku), sh = it.shared;
+  if (sh) it = { ...it, current: sh.current, sold: sh.sold, stockIn: sh.stockIn, actual: sh.actual, action: sh.action, stockStatus: sh.stockStatus };
   openSheet(`
     <h2>${esc(p.name)}</h2>
     <p class="small muted">${esc(itemSub(p))} · Original price ${RM(p.retail_price)} · ${esc(p.status)}</p>
     <form id="cf" style="margin-bottom:12px">
       <div class="two"><label class="field"><span>${esc(r.name)} code</span><input id="code" value="${esc(it.code || "")}" placeholder="e.g. APO091" autocapitalize="characters"></label>
       <label class="field"><span>${esc(r.name)} price (RM)</span><input id="price" type="number" step="0.01" min="0" inputmode="decimal" value="${it.price}"></label></div>
+      ${sizes.length > 1 ? `<label style="display:flex;gap:8px;align-items:flex-start;margin:0 2px 12px"><input type="checkbox" id="allSizes" ${sh ? "checked" : ""} style="width:auto;min-height:0;margin-top:3px"><span class="small">Same code for all sizes (${esc(sizes.map(x => sizeShort(prod(x)?.size) || "").join(", "))}) — use this if ${esc(r.name)} doesn't separate sizes</span></label>` : ""}
+      ${sh ? `<p class="small muted" style="margin:-4px 2px 12px">${esc(r.name)} uses this code for all sizes, so figures below are for the whole design.</p>` : ""}
       <button class="btn block">Save code & price</button></form>
     <div class="figures">
       <div class="figure"><div class="label">On shelf</div><div class="value">${it.current}</div></div>
@@ -1311,9 +1364,15 @@ function itemAtRetailerSheet(r, it) {
       const code = root.querySelector("#code").value.trim().toUpperCase() || null;
       const pv = root.querySelector("#price").value, price = pv === "" ? null : Number(pv);
       try {
-        const other = code && skuForCode(r.id, code);
-        if (other && other !== p.sku) return toast(`${code} is already used for ${prod(other)?.name}`);
-        await q(sb.from("retailer_codes").upsert({ location_id: r.id, sku: p.sku, code, price }, { onConflict: "location_id,sku" }));
+        const all = !!root.querySelector("#allSizes")?.checked, targets = all ? sizes : [p.sku];
+        /* a code can only be shared by sizes of the same design, and only when "same code for all sizes" is ticked */
+        const users = code ? skusForCode(r.id, code).filter(o => !targets.includes(o)) : [];
+        const leaving = !all && sh ? sh.skus : [];   /* unticking: the other sizes give the shared code up */
+        const other = users.find(o => !leaving.includes(o));
+        if (other) return toast(sizes.includes(other) ? `${code} is already used for ${prod(other)?.name}. Tick "Same code for all sizes" to share it.` : `${code} is already used for ${prod(other)?.name}`);
+        await q(sb.from("retailer_codes").upsert(targets.map(sku => ({ location_id: r.id, sku, code, price: sku === p.sku ? price : (state.codes.find(c => c.location_id === r.id && c.sku === sku)?.price ?? price) })), { onConflict: "location_id,sku" }));
+        /* unticking: the other sizes stop sharing this code (their own codes can be added later) */
+        if (sh && !all) { const rest = sh.skus.filter(x => x !== p.sku); if (rest.length) await q(sb.from("retailer_codes").update({ code: null }).eq("location_id", r.id).in("sku", rest)); }
         await loadAll(); closeSheet(); toast("Saved"); render();
       } catch (err) { fail(err); }
     };
@@ -1479,7 +1538,7 @@ function pasteSalesSheet(r) {
     const draw = async () => {
       const mon = root.querySelector("#mon").value, reportId = `${r.code}-SALES-${mon}`;
       let existing = [], pay = null;
-      try { existing = await q(live("sales", "id").eq("report_id", reportId)); } catch {}
+      try { existing = await q(live("sales", "id,sku,qty").eq("report_id", reportId)); } catch {}
       try { [pay] = await q(sb.from("payouts").select("*").eq("location_id", r.id).eq("period_month", mon + "-01")); } catch {}
       const ok = lines.filter(l => l.sku), bad = lines.filter(l => !l.sku);
       const total = round2(ok.reduce((t, l) => t + Number(l.amount || 0), 0)), pcs = ok.reduce((t, l) => t + Number(l.qty || 0), 0);
@@ -1487,7 +1546,7 @@ function pasteSalesSheet(r) {
       root.querySelector("#readStatus").textContent = lines.length ? `Read ${lines.length} item${lines.length > 1 ? "s" : ""} from ${src}. Check the numbers, then save.` : (src ? `No ${r.name} codes found in ${src}.` : "");
       root.querySelector("#out").innerHTML = !lines.length ? "" : `
         ${bad.length ? `<div class="warn-banner">${bad.length} code${bad.length > 1 ? "s" : ""} not in the ${esc(r.name)} list. Pick the item so it's counted, or leave it to skip.</div>` : ""}
-        <div class="list tight">${lines.map((l, i) => `<div class="row edit-row" data-i="${i}"><div class="grow"><div class="title" style="white-space:normal">${l.sku ? esc(nice(prod(l.sku).name)) : itemSelect(r, null)}</div><div class="small muted">${esc(l.code)}${l.sku ? ` · ${RM(shopPrice(r.id, l.sku))} each` : ""}</div></div>
+        <div class="list tight">${lines.map((l, i) => `<div class="row edit-row" data-i="${i}"><div class="grow"><div class="title" style="white-space:normal">${l.sku ? (sharedSkus(r.id, l.sku).length > 1 ? `${esc(nice(baseName(prod(l.sku).name)))} (all sizes)` : esc(nice(prod(l.sku).name))) : itemSelect(r, null)}</div><div class="small muted">${esc(l.code)}${l.sku ? ` · ${RM(shopPrice(r.id, l.sku))} each` : ""}${l.sku && sharedSkus(r.id, l.sku).length > 1 ? " · one code for all sizes" : ""}</div></div>
           <input class="mini-num" data-k="qty" type="number" inputmode="numeric" value="${l.qty}" aria-label="Quantity"><input class="mini-num wide" data-k="amount" type="number" step="0.01" inputmode="decimal" value="${l.amount ?? ""}" aria-label="Amount"></div>`).join("")}</div>
         <div class="card" style="margin-top:12px"><table class="simple">
           <tr><td>${pcs} pieces sold</td><td class="r"><strong>${RM(total)}</strong></td></tr>
@@ -1506,7 +1565,17 @@ function pasteSalesSheet(r) {
         const last = stage === "mid" ? mid : new Date(ms.getFullYear(), ms.getMonth() + 1, 0, 12);
         try {
           if (existing.length) await q(sb.from("sales").update({ deleted_at: new Date().toISOString() }).eq("report_id", reportId).is("deleted_at", null));
-          await q(sb.from("sales").insert(ok.map(l => ({ sold_at: last.toISOString(), sale_month: mon + "-01", channel: "retailer", location_id: r.id, report_id: reportId, sku: l.sku, qty: l.qty, unit_price: shopPrice(r.id, l.sku), amount: round2(l.amount || 0), notes: stage === "mid" ? "Mid-month report" : null }))));
+          const row = (sku, qty, amount, extra) => ({ sold_at: last.toISOString(), sale_month: mon + "-01", channel: "retailer", location_id: r.id, report_id: reportId, sku, qty, unit_price: shopPrice(r.id, sku), amount: round2(amount), notes: stage === "mid" ? "Mid-month report" : null, ...extra });
+          const rows = [];
+          for (const l of ok) {
+            const grp = sharedSkus(r.id, l.sku);
+            if (grp.length < 2 || !(l.qty > 0)) { rows.push(row(l.sku, l.qty, l.amount || 0)); continue; }
+            /* one code for all sizes: stock before this report = now + what the replaced report had taken off */
+            const have = {}; grp.forEach(x => have[x] = stockAt(r.id, x) + existing.filter(e => e.sku === x).reduce((t, e) => t + (e.qty || 0), 0));
+            const split = Object.entries(splitShared(grp, l.qty, have)); let left = round2(l.amount || 0);
+            split.forEach(([sku, n], k) => { const a = k === split.length - 1 ? left : round2((l.amount || 0) * n / l.qty); left = round2(left - a); rows.push(row(sku, n, a, { description: "Size not given by shop" })); });
+          }
+          await q(sb.from("sales").insert(rows));
           await q(sb.from("payouts").upsert({ location_id: r.id, period_month: mon + "-01", sales_amount: total, commission: comm, net_amount: round2(total - comm), report_stage: stage, report_date: repTo && repTo.slice(0, 7) === mon ? repTo : ymd(new Date()), due_on: dueDate(mon) }, { onConflict: "location_id,period_month" }));
           await loadStock(); closeSheet(); toast(`${monthLabel(mon)} ${stage === "mid" ? "mid-month" : "final"} report saved · ${pcs} pieces`);
           state.rTab = "sales"; state.rMonth = mon; afterRetailerSave();
@@ -1535,9 +1604,12 @@ function tallySheet(r) {
     ${sourcePicker("Paste the shop's stock list: code and quantity per line")}
     <div id="out"></div>`, root => {
     const draw = () => {
-      const counted = {}; lines.filter(l => l.sku).forEach(l => counted[l.sku] = (counted[l.sku] || 0) + Number(l.qty || 0));
-      const skus = new Set([...Object.keys(counted), ...state.products.filter(p => stockAt(r.id, p.sku) !== 0).map(p => p.sku)]);
-      const rows = [...skus].map(sku => ({ sku, app: stockAt(r.id, sku), shop: counted[sku] || 0 }));
+      /* sizes sharing one shop code are counted together */
+      const keyOf = sku => { const g = sharedSkus(r.id, sku); return g.length > 1 ? "g:" + codeAt(r.id, sku).toUpperCase() : sku; };
+      const members = k => k.startsWith("g:") ? skusForCode(r.id, k.slice(2)) : [k];
+      const counted = {}; lines.filter(l => l.sku).forEach(l => { const k = keyOf(l.sku); counted[k] = (counted[k] || 0) + Number(l.qty || 0); });
+      const skus = new Set([...Object.keys(counted), ...state.products.filter(p => stockAt(r.id, p.sku) !== 0).map(p => keyOf(p.sku))]);
+      const rows = [...skus].map(sku => ({ sku, app: members(sku).reduce((t, x) => t + stockAt(r.id, x), 0), shop: counted[sku] || 0 }));
       const diffs = rows.filter(d => d.app !== d.shop), bad = lines.filter(l => !l.sku);
       root.querySelector("#readStatus").textContent = lines.length ? `Read ${lines.length} item${lines.length > 1 ? "s" : ""} from ${src}.` : (src ? `No ${r.name} codes found in ${src}.` : "");
       if (!lines.length) { root.querySelector("#out").innerHTML = ""; return; }
@@ -1546,7 +1618,7 @@ function tallySheet(r) {
           <div class="list tight" style="margin-bottom:12px">${bad.map(b => `<div class="row" data-bad="${lines.indexOf(b)}"><div class="grow">${itemSelect(r, null)}<div class="small muted">${esc(b.code)} · shop count ${b.qty}</div></div></div>`).join("")}</div>` : ""}
         <div class="figures"><div class="figure"><div class="label">Shop counted</div><div class="value">${Object.values(counted).reduce((a, b) => a + b, 0)}</div></div><div class="figure"><div class="label">App says</div><div class="value">${stockTotalAt(r.id)}</div></div></div>
         ${diffs.length ? `<p class="small muted" style="margin:0 2px 10px">${diffs.length} item${diffs.length > 1 ? "s" : ""} to check. A difference can just be sales made after the sales report, so it's best to accept counts with the final end-of-month report.</p>
-          <div class="list tight">${diffs.map(d => `<label class="row diff-row"><input type="checkbox" data-acc="${d.sku}" style="width:auto;min-height:0;box-shadow:none"><div class="grow"><div class="title" style="white-space:normal">${esc(nice(prod(d.sku)?.name || d.sku))}</div><div class="small muted">${esc(codeAt(r.id, d.sku) || "No code")} · app ${d.app} · shop ${d.shop}</div></div><span class="tag ${d.shop < d.app ? "brass" : "green"}">${d.shop > d.app ? "+" : ""}${d.shop - d.app}</span></label>`).join("")}</div>
+          <div class="list tight">${diffs.map(d => `<label class="row diff-row"><input type="checkbox" data-acc="${d.sku}" style="width:auto;min-height:0;box-shadow:none"><div class="grow"><div class="title" style="white-space:normal">${d.sku.startsWith("g:") ? `${esc(nice(baseName(prod(members(d.sku)[0])?.name || "")))} (all sizes)` : esc(nice(prod(d.sku)?.name || d.sku))}</div><div class="small muted">${esc(d.sku.startsWith("g:") ? d.sku.slice(2) : codeAt(r.id, d.sku) || "No code")} · app ${d.app} · shop ${d.shop}</div></div><span class="tag ${d.shop < d.app ? "brass" : "green"}">${d.shop > d.app ? "+" : ""}${d.shop - d.app}</span></label>`).join("")}</div>
           <button type="button" class="link" id="all" style="margin:10px 2px">Select all</button>`
         : `<div class="card"><h3>Everything matches</h3><p class="muted">${lines.length} items.</p></div>`}
         <button class="btn primary block" id="save" style="margin-top:8px">Save stock report${diffs.length ? " (use shop's count for ticked items)" : ""}</button>`;
@@ -1557,7 +1629,14 @@ function tallySheet(r) {
         const date = root.querySelector("#d").value;
         try {
           await q(sb.from("shop_stock_reports").insert({ location_id: r.id, report_date: date, lines: lines.map(l => ({ code: l.code, sku: l.sku, qty: l.qty })), notes: src }));
-          if (acc.length) await q(sb.from("stock_movements").insert(acc.map(d => d.shop > d.app ? { moved_on: date, sku: d.sku, qty: d.shop - d.app, to_location: r.id, reason: "correction", notes: "Shop stock report" } : { moved_on: date, sku: d.sku, qty: d.app - d.shop, from_location: r.id, reason: "correction", notes: "Shop stock report" })));
+          const fix = [];
+          for (const d of acc) {
+            const ms = members(d.sku), note = ms.length > 1 ? "Shop stock report (all sizes, one code)" : "Shop stock report";
+            if (d.shop > d.app) { fix.push({ moved_on: date, sku: ms[0], qty: d.shop - d.app, to_location: r.id, reason: "correction", notes: note }); continue; }
+            const have = {}; ms.forEach(x => have[x] = stockAt(r.id, x));
+            Object.entries(splitShared(ms, d.app - d.shop, have)).forEach(([sku, n]) => fix.push({ moved_on: date, sku, qty: n, from_location: r.id, reason: "correction", notes: note }));
+          }
+          if (fix.length) await q(sb.from("stock_movements").insert(fix));
           await loadStock(); closeSheet(); toast(acc.length ? `Stock report saved · ${acc.length} count${acc.length > 1 ? "s" : ""} updated` : "Stock report saved"); afterRetailerSave();
         } catch (e) { fail(e); }
       };
@@ -1596,9 +1675,9 @@ function sendStockSheet(r) {
       const sent = new Set(rows.map(x => x.sku));
       const codes = [...root.querySelectorAll("input[data-code]")].map(i => { const pv = root.querySelector(`input[data-price="${i.dataset.code}"]`).value; return { sku: i.dataset.code, code: i.value.trim().toUpperCase() || null, price: pv === "" ? null : Number(pv) }; })
         .filter(x => (x.code || x.price != null) && (sent.has(x.sku) || x.code));
-      for (const c of codes.filter(c => c.code)) { const o = skuForCode(r.id, c.code); if (o && o !== c.sku) return toast(`${c.code} is already ${prod(o)?.name}`); }
-      const typed = codes.filter(c => c.code).map(c => c.code);
-      if (new Set(typed).size !== typed.length) return toast("The same code is typed twice");
+      for (const c of codes.filter(c => c.code)) { const o = skusForCode(r.id, c.code).find(x => x !== c.sku && !designSkus(c.sku).includes(x)); if (o) return toast(`${c.code} is already ${prod(o)?.name}`); }
+      const typed = codes.filter(c => c.code);
+      for (const c of typed) { const o = typed.find(x => x !== c && x.code === c.code && !designSkus(c.sku).includes(x.sku)); if (o) return toast(`${c.code} is typed for two different items`); }
       const ws = workshop().id, date = root.querySelector("#d").value, ref = root.querySelector("#ref").value.trim() || null;
       try {
         if (codes.length) await q(sb.from("retailer_codes").upsert(codes.map(c => ({ location_id: r.id, ...c })), { onConflict: "location_id,sku" }));
