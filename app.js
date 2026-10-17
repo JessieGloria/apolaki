@@ -345,7 +345,8 @@ async function fetchHomeData() {
     q(sb.from("payouts").select("location_id").eq("period_month", ymd(pm)))
   ]);
   let balance = null; try { balance = await fetchBalance(); } catch {}
-  return { year: now.getFullYear(), sales, pays, exps, unpaid, recentSales, recentMoves, lastReports, balance };
+  let shopOpen = []; try { shopOpen = await q(live("shop_orders", "id,status").in("status", ["pending", "paid", "packed"])); } catch {}
+  return { year: now.getFullYear(), sales, pays, exps, unpaid, recentSales, recentMoves, lastReports, balance, shopOpen };
 }
 
 async function renderHome() {
@@ -435,6 +436,9 @@ function drawHome(d, quiet) {
 
   /* needs attention: things that want an action */
   const attn = [];
+  const shopWait = (d.shopOpen || []).filter(o => o.status === "pending").length, shopTodo = (d.shopOpen || []).length - shopWait;
+  if (shopTodo) attn.push({ c: "var(--coral)", t: `${shopTodo} paid shop order${shopTodo > 1 ? "s" : ""} to make & ship`, s: "Online shop orders", go: "shop" });
+  if (shopWait) attn.push({ c: "var(--peach)", t: `${shopWait} shop order${shopWait > 1 ? "s" : ""} waiting for payment`, s: "Confirm when the money arrives", go: "shop" });
   d.unpaid.forEach(u => {
     const due = u.due_on || dueDate(u.period_month.slice(0, 7)), today = ymd(now), soon = ymd(new Date(now.getTime() + 5 * 864e5));
     if (due < today) attn.push({ c: "var(--coral)", t: `${loc(u.location_id)?.name || "Shop"} payment for ${monthLabel(u.period_month.slice(0, 7))} is overdue`, s: `${RM(u.net_amount)} was due ${shortDate(due)}`, go: "retailers" });
@@ -463,6 +467,7 @@ function drawHome(d, quiet) {
       ${pc("g-coral tall", "Running low", low.length, "stock", low.length ? low.slice(0, 2).map(x => x.p.name.toLowerCase().replace(/\b\w/g, c => c.toUpperCase())).join(", ") + (low.length > 2 ? "…" : "") : "All stocked", true)}
       ${pc("g-dusk", activeMarkets.length === 1 ? "Market open" : "Markets open", activeMarkets.length, "market", activeMarkets.length ? activeMarkets.map(m => m.name).join(", ") : "Tap to start one")}
     </div></div>
+    <button type="button" class="row" id="shopRow" style="width:100%;border:0;text-align:left;margin-top:14px"><div class="grow"><div class="title">Online shop orders</div><div class="small muted">${(d.shopOpen || []).length ? `${(d.shopOpen || []).length} open` : "Orders from the shop website"}</div></div>${CHEV}</button>
     ${attn.length ? `<h2>Needs attention</h2><div class="card">${attn.map((a, i) => `<div class="attn" data-ai="${i}"><span class="dot" style="background:${a.c}"></span><div class="grow">${esc(a.t)}<span class="small muted">${esc(a.s)}</span></div>${CHEV}</div>`).join("")}</div>` : ""}
     <h2>Money in by month</h2>
     <div class="card">
@@ -478,8 +483,9 @@ function drawHome(d, quiet) {
     <div class="tiles">${places.map(l => { const n = stockTotalAt(l.id); return `<button class="ttile" data-place="${l.id}">${ico(placeIcon(l), placeColor(l), true)}<div class="name">${esc(l.name)}</div><div class="sub">${n} pieces</div><div class="meter"><i style="width:${pieces ? n / pieces * 100 : 0}%;background:${placeColor(l)}"></i></div><div class="sub">${pieces ? Math.round(n / pieces * 100) : 0}% of stock</div></button>`; }).join("")}</div>
     ${acts.length ? `<h2>Recent activity</h2><div class="tl">${acts.map(a => `<div class="tl-item"><span class="tl-dot"></span><div class="tl-card"><div class="tl-meta"><span class="tl-chip">${esc(a.chip)}</span><span>${ago(a.at)}</span></div><div class="tl-body"><span>${esc(a.title)}${a.sub ? `<span class="small muted" style="display:block">${esc(a.sub)}</span>` : ""}</span>${a.right ? `<strong>${a.right}</strong>` : ""}</div></div></div>`).join("")}</div>` : ""}`;
   view.querySelectorAll("[data-p]").forEach(b => b.onclick = () => { state.homePeriod = b.dataset.p; drawHome(d, true); });
+  $("#shopRow").onclick = shopOrdersSheet;
   view.querySelectorAll("[data-go]").forEach(r => r.onclick = () => go(r.dataset.go));
-  view.querySelectorAll("[data-ai]").forEach(r => r.onclick = () => { const a = attn[Number(r.dataset.ai)]; if (a.sell) { state.sellAt = a.sell; localSet("sellAt", a.sell); } go(a.go); });
+  view.querySelectorAll("[data-ai]").forEach(r => r.onclick = () => { const a = attn[Number(r.dataset.ai)]; if (a.go === "shop") return shopOrdersSheet(); if (a.sell) { state.sellAt = a.sell; localSet("sellAt", a.sell); } go(a.go); });
   view.querySelectorAll("[data-place]").forEach(t => t.onclick = () => { state.stockLoc = Number(t.dataset.place); go("stock"); });
 }
 
@@ -567,11 +573,12 @@ async function renderSell() {
   const choices = markets.map(m => `<option value="${m.id}" ${t && t.key === m.id ? "selected" : ""}>${esc(m.name)}</option>`).join("")
     + `<option value="online" ${t && t.key === "online" ? "selected" : ""}>Online orders (from workshop)</option>`;
   if (!t) {
-    view.innerHTML = `<h1 class="big">Sell at<br>the market</h1><div class="card"><h3>Start a market</h3><p class="muted">Create the market, bring stock from the workshop, then tap pieces to sell.</p><div class="btns"><button class="btn primary" id="newMarket">New market</button><button class="btn" id="goOnline">Record an online order</button></div></div>
+    view.innerHTML = `<h1 class="big">Sell at<br>the market</h1><div class="card"><h3>Start a market</h3><p class="muted">Create the market, bring stock from the workshop, then tap pieces to sell.</p><div class="btns"><button class="btn primary" id="newMarket">New market</button><button class="btn" id="goOnline">Record an online order</button><button class="btn" id="shopOrd">Shop orders</button></div></div>
       <button type="button" class="btn block" id="pastMarkets" style="margin-top:12px">Markets &amp; analysis</button>`;
     $("#newMarket").onclick = newMarketSheet;
     $("#pastMarkets").onclick = marketsSheet;
     $("#goOnline").onclick = () => { state.sellAt = "online"; localSet("sellAt", "online"); render(); };
+    $("#shopOrd").onclick = shopOrdersSheet;
     return;
   }
   const s = state.search.toLowerCase();
@@ -1929,6 +1936,8 @@ function productForm(p) {
       </div>
       <input type="hidden" name="photo" id="photoVal" value="${esc(v.photo || "")}">
       ${field("notes", "Notes (optional)")}
+      <label class="row" style="margin:4px 0 12px;cursor:pointer"><div class="grow"><div class="title">Show on the online shop</div><div class="small muted">Customers can see and order it (needs status Active and a price)</div></div><input type="checkbox" name="show_online" ${v.show_online ? "checked" : ""} style="width:22px;height:22px;min-height:0;flex:none;padding:0;box-shadow:none;accent-color:var(--accent)"></label>
+      <label class="field"><span>Shop description (optional)</span><textarea name="web_description" rows="3" style="min-height:84px;font-family:inherit;font-size:13.5px" placeholder="A line or two for customers: materials, size, how it's made">${esc(v.web_description || "")}</textarea></label>
       <p class="small muted" style="margin-top:-4px">Used at markets and online. Each shop's own price is set on that shop's page.</p>
       ${codes ? `<p class="small muted">Shops: ${codes}</p>` : ""}
       <button class="btn primary block">${p ? "Save item" : "Add item"}</button>
@@ -1966,6 +1975,7 @@ function productForm(p) {
       const start = parseInt(f.start_qty, 10) || 0; delete f.start_qty;
       for (const k in f) if (typeof f[k] === "string") { f[k] = f[k].trim(); if (f[k] === "") f[k] = null; }
       f.retail_price = Number(f.retail_price) || 0;
+      f.show_online = !!e.target.querySelector("[name=show_online]").checked;
       if (!f.name) return toast("Give the item a name");
       try {
         if (p) await q(sb.from("products").update(f).eq("sku", p.sku));
@@ -1978,6 +1988,144 @@ function productForm(p) {
         }
         await loadAll(); closeSheet(); toast(p ? "Item saved" : start ? `${f.name} added · ${start} in workshop` : `${f.name} added`); render();
       } catch (err) { fail(err); }
+    };
+  });
+}
+
+/* =========================================================
+   ONLINE SHOP — orders placed on the shop website, and its settings
+   ========================================================= */
+const SHOP_STATUS = { pending: "Waiting for payment", paid: "Paid · to make & ship", packed: "Packed", shipped: "Shipped", cancelled: "Cancelled" };
+const SHOP_REGION = { semenanjung: "Peninsular Malaysia", sarawak: "Sarawak", sabah: "Sabah", overseas: "Overseas" };
+const waNum = ph => String(ph || "").replace(/\D/g, "").replace(/^0/, "60");
+let shopTab = "todo";
+async function shopOrdersSheet() {
+  let orders = [];
+  try { orders = await q(live("shop_orders", "*").order("created_at", { ascending: false }).limit(200)); } catch (e) { return fail(e); }
+  const tabs = [["todo", "To do", o => ["pending", "paid", "packed"].includes(o.status)], ["shipped", "Shipped", o => o.status === "shipped"], ["cancelled", "Cancelled", o => o.status === "cancelled"]];
+  openSheet(`
+    <h2>Shop orders</h2>
+    <button class="btn block" id="shopSet">Shop settings</button>
+    <div class="ttabs" style="margin-top:16px">${tabs.map(([k, l, f]) => `<button type="button" data-t="${k}" aria-pressed="${k === shopTab}">${l} <span class="muted">${orders.filter(f).length}</span></button>`).join("")}</div>
+    <div class="list tight" id="ordList"></div>`, root => {
+    const draw = () => {
+      const f = tabs.find(t => t[0] === shopTab)[2], list = orders.filter(f);
+      root.querySelector("#ordList").innerHTML = list.length ? list.map(o => `<div class="row" data-o="${o.id}"><div class="grow"><div class="title">${esc(o.order_no)} · ${esc(o.customer_name)}</div>
+        <div class="small muted">${ago(o.created_at)} · ${esc(SHOP_REGION[o.region] || o.region)}</div><span class="tag" style="margin-top:4px">${esc(SHOP_STATUS[o.status] || o.status)}</span></div>
+        <span class="num">${o.total != null ? RM(o.total) : ""}</span>${CHEV}</div>`).join("") : `<div class="small muted" style="padding:12px 2px">No orders here.</div>`;
+      root.querySelectorAll("[data-o]").forEach(r => r.onclick = () => shopOrderPage(orders.find(o => o.id === Number(r.dataset.o))));
+    };
+    root.querySelectorAll("[data-t]").forEach(b => b.onclick = () => { shopTab = b.dataset.t; root.querySelectorAll("[data-t]").forEach(x => x.setAttribute("aria-pressed", x === b)); draw(); });
+    root.querySelector("#shopSet").onclick = shopSettingsSheet;
+    draw();
+  });
+}
+async function shopOrderPage(o) {
+  let items = [];
+  try { items = await q(sb.from("shop_order_items").select("*").eq("order_id", o.id).order("id")); } catch (e) { return fail(e); }
+  const made = items.filter(i => !i.ready);
+  const addr = [o.address, [o.postcode, o.city].filter(Boolean).join(" "), o.state, o.region === "overseas" ? o.country : ""].filter(Boolean).join(", ");
+  const msg = o.status === "shipped" ? `Hi ${o.customer_name}, your Apolaki order ${o.order_no} is on its way!${o.tracking ? ` Tracking: ${o.tracking}${o.courier ? " (" + o.courier + ")" : ""}` : ""}`
+    : o.status === "pending" ? `Hi ${o.customer_name}, thank you for your Apolaki order ${o.order_no}.${o.shipping_fee == null ? "" : ` The total is ${RM(o.total)}.`}`
+    : `Hi ${o.customer_name}, we've received your payment for Apolaki order ${o.order_no}. Thank you!`;
+  const when = [["Ordered", o.created_at], ["Paid", o.paid_at], ["Packed", o.packed_at], ["Shipped", o.shipped_at]].filter(x => x[1]).map(([l, t]) => `${l} ${ago(t)}`).join(" · ");
+  const PAY = ["DuitNow", "Transfer", "Cash"];
+  openSheet(`
+    <h2>Order ${esc(o.order_no)}</h2>
+    <p class="small muted" style="margin:-4px 2px 12px">${esc(SHOP_STATUS[o.status] || o.status)} · ${esc(when)}</p>
+    <div class="card">
+      <h3>${esc(o.customer_name)}</h3>
+      <p class="small" style="margin:4px 0">${esc(o.phone)}${o.email ? " · " + esc(o.email) : ""}</p>
+      <p class="small muted" style="margin:0">${esc(SHOP_REGION[o.region] || o.region)}${addr ? " · " + esc(addr) : ""}</p>
+      ${o.customer_note ? `<p class="small" style="margin:8px 0 0"><b>Note:</b> ${esc(o.customer_note)}</p>` : ""}
+      <a class="btn block" style="margin-top:12px" href="https://wa.me/${waNum(o.phone)}?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">WhatsApp ${esc(o.customer_name.split(" ")[0])}</a>
+    </div>
+    <div class="list tight" style="margin-top:12px">${items.map(i => `<div class="row"><div class="grow"><div class="title" style="white-space:normal">${i.qty}× ${esc(nice(i.name))}</div>
+      <div class="small muted">${i.size && !/^(free|assorted)$/i.test(i.size) ? esc(i.size) + " · " : ""}${i.ready ? "Was ready to ship" : "Made to order"}</div></div><span class="num">${RM(i.qty * i.unit_price)}</span></div>`).join("")}
+      <div class="row"><div class="grow"><div class="title">Shipping</div></div><span class="num">${o.shipping_fee == null ? "Not set" : RM(o.shipping_fee)}</span></div>
+      <div class="row"><div class="grow"><div class="title">Total</div></div><span class="num"><b>${RM(Number(o.subtotal) + Number(o.shipping_fee || 0))}</b></span></div></div>
+    ${o.status === "pending" ? `
+      ${o.region === "overseas" || o.shipping_fee == null ? `<div class="two" style="margin-top:14px"><label class="field"><span>Shipping fee (RM)</span><input id="fee" type="number" step="0.01" min="0" inputmode="decimal" value="${o.shipping_fee ?? ""}"></label>
+        <div style="display:flex;align-items:flex-end;margin-bottom:12px"><button class="btn block" id="saveFee">Save fee</button></div></div>` : ""}
+      <h3 style="margin-top:16px">Payment received?</h3>
+      <div class="chips">${PAY.map((p, i) => `<button type="button" class="chip" data-pay="${p}" aria-pressed="${i === 0}">${p}</button>`).join("")}</div>
+      <button class="btn primary block" id="paid" ${o.shipping_fee == null ? "disabled" : ""}>Confirm payment · ${RM(Number(o.subtotal) + Number(o.shipping_fee || 0))}</button>
+      <p class="small muted" style="margin-top:8px">${o.shipping_fee == null ? "Save the shipping fee first, then WhatsApp the customer the total. " : ""}Records the sale as an online order. Stock leaves the Workshop when you mark it shipped.</p>` : ""}
+    ${["paid", "packed"].includes(o.status) ? `
+      ${made.length ? `<div class="warn-banner" style="margin-top:14px">To make: ${made.map(i => `${i.qty}× ${esc(nice(i.name))}`).join(", ")}</div>` : ""}
+      ${o.status === "paid" ? `<button class="btn block" id="packed" style="margin-top:12px">Mark packed</button>` : ""}
+      <h3 style="margin-top:16px">Ship it</h3>
+      <div class="two"><label class="field"><span>Courier</span><input id="courier" placeholder="Pos Laju, J&amp;T…" value="${esc(o.courier || "")}"></label>
+        <label class="field"><span>Tracking number</span><input id="tracking" value="${esc(o.tracking || "")}"></label></div>
+      <button class="btn primary block" id="shipped">Mark shipped</button>
+      <p class="small muted" style="margin-top:8px">Takes the pieces out of Workshop stock. Made-to-order pieces that were never added to stock are added and taken out together.</p>` : ""}
+    ${o.status === "shipped" && o.tracking ? `<p class="small" style="margin-top:12px">Tracking: <b>${esc(o.tracking)}</b>${o.courier ? " · " + esc(o.courier) : ""}</p>` : ""}
+    <label class="field" style="margin-top:16px"><span>Private note</span><input id="anote" value="${esc(o.admin_note || "")}" placeholder="Only you see this"></label>
+    ${o.status !== "cancelled" ? `<button type="button" class="btn danger block" id="cancel" style="margin-top:6px">Cancel order</button>` : ""}`, root => {
+    const act = async (action, p, done) => {
+      try {
+        const res = await q(sb.rpc("shop_order_action", { p_order: o.id, p_action: action, p: p || {} }));
+        if (["paid", "shipped", "cancel"].includes(action)) { await loadStock(); localSet("homeData", null); }
+        toast(done); shopOrderPage(res);
+      } catch (e) { fail(e); }
+    };
+    let pay = PAY[0];
+    root.querySelectorAll("[data-pay]").forEach(b => b.onclick = () => { pay = b.dataset.pay; root.querySelectorAll("[data-pay]").forEach(x => x.setAttribute("aria-pressed", x === b)); });
+    const $r = s => root.querySelector(s);
+    if ($r("#saveFee")) $r("#saveFee").onclick = () => { const v = $r("#fee").value; if (v === "") return toast("Enter the shipping fee"); act("shipping", { fee: Number(v) }, "Shipping fee saved"); };
+    if ($r("#paid")) $r("#paid").onclick = () => act("paid", { method: pay }, `${o.order_no} paid · sale recorded`);
+    if ($r("#packed")) $r("#packed").onclick = () => act("packed", {}, "Marked packed");
+    if ($r("#shipped")) $r("#shipped").onclick = () => act("shipped", { courier: $r("#courier").value, tracking: $r("#tracking").value }, `${o.order_no} shipped`);
+    if ($r("#cancel")) $r("#cancel").onclick = () => { if (confirm(`Cancel order ${o.order_no}?${o.status !== "pending" ? " Its sale will be removed from your records." : ""}`)) act("cancel", {}, `${o.order_no} cancelled`); };
+    $r("#anote").onchange = e => act("note", { note: e.target.value }, "Note saved");
+  });
+}
+async function shopSettingsSheet() {
+  let s = {};
+  try { const r = await q(sb.from("app_settings").select("value").eq("key", "shop")); s = (r[0] || {}).value || {}; } catch (e) { return fail(e); }
+  const rates = s.rates || {};
+  const f = (k, label, v, extra = "") => `<label class="field"><span>${label}</span><input name="${k}" value="${esc(v ?? "")}" ${extra}></label>`;
+  openSheet(`
+    <h2>Shop settings</h2>
+    <p class="small muted" style="margin:-4px 2px 12px">Everything here is shown to customers on the shop website.</p>
+    <form id="sf">
+      ${f("whatsapp", "WhatsApp number for orders", s.whatsapp, 'type="tel" placeholder="012-345 6789"')}
+      <div class="two">${f("bank_name", "Bank", s.bank_name, 'placeholder="Maybank"')}${f("account_name", "Account name", s.account_name)}</div>
+      ${f("account_no", "Account number", s.account_no, 'inputmode="numeric"')}
+      <label class="field"><span>DuitNow QR (optional)</span></label>
+      <div class="photo-pick">
+        <div class="photo-box" id="qrBox">${s.duitnow_qr ? `<img src="${esc(s.duitnow_qr)}" alt="">` : ""}</div>
+        <div class="photo-btns"><label class="btn">Choose QR image<input type="file" accept="image/*" id="qrIn" hidden></label>
+          ${s.duitnow_qr ? `<button type="button" class="link" id="noQr" style="color:var(--rust)">Remove</button>` : ""}</div>
+      </div>
+      <input type="hidden" name="duitnow_qr" id="qrVal" value="${esc(s.duitnow_qr || "")}">
+      <h3 style="margin-top:16px">Shipping</h3>
+      <div class="two">${f("r_semenanjung", "Peninsular (RM)", rates.semenanjung, 'type="number" step="0.01" min="0" inputmode="decimal"')}${f("r_sarawak", "Sarawak (RM)", rates.sarawak, 'type="number" step="0.01" min="0" inputmode="decimal"')}</div>
+      <div class="two">${f("r_sabah", "Sabah (RM)", rates.sabah, 'type="number" step="0.01" min="0" inputmode="decimal"')}${f("lead_days", "Made to order ships within (days)", s.lead_days ?? 7, 'type="number" min="1" step="1" inputmode="numeric"')}</div>
+      <p class="small muted">Overseas shipping is quoted per order on WhatsApp.</p>
+      ${f("shop_url", "Shop website address (optional)", s.shop_url, 'type="url" placeholder="https://apolaki-shop.vercel.app"')}
+      <button class="btn primary block">Save settings</button>
+    </form>
+    ${s.shop_url ? `<a class="btn block" style="margin-top:10px" href="${esc(s.shop_url)}" target="_blank" rel="noopener">Open the shop</a>` : ""}`, root => {
+    let busy = false;
+    root.querySelector("#qrIn").onchange = async e => {
+      const file = e.target.files && e.target.files[0]; if (!file) return;
+      busy = true; root.querySelector("#qrBox").innerHTML = `<div class="skeleton" style="height:100%;margin:0"></div>`;
+      try { const url = await uploadPhoto(file); root.querySelector("#qrVal").value = url; root.querySelector("#qrBox").innerHTML = `<img src="${esc(url)}" alt="">`; toast("QR added"); }
+      catch (err) { root.querySelector("#qrBox").innerHTML = ""; fail(err); }
+      busy = false; e.target.value = "";
+    };
+    const nq = root.querySelector("#noQr"); if (nq) nq.onclick = () => { root.querySelector("#qrVal").value = ""; root.querySelector("#qrBox").innerHTML = ""; nq.remove(); };
+    root.querySelector("#sf").onsubmit = async e => {
+      e.preventDefault();
+      if (busy) return toast("Wait for the QR to finish uploading");
+      const v = Object.fromEntries(new FormData(e.target)); for (const k in v) v[k] = String(v[k]).trim();
+      const num = x => x === "" ? null : Number(x);
+      const value = { ...s, whatsapp: v.whatsapp, bank_name: v.bank_name, account_name: v.account_name, account_no: v.account_no, duitnow_qr: v.duitnow_qr,
+        lead_days: num(v.lead_days) || 7, shop_url: v.shop_url, rates: { semenanjung: num(v.r_semenanjung), sarawak: num(v.r_sarawak), sabah: num(v.r_sabah) } };
+      if (Object.values(value.rates).some(r => r == null)) return toast("Fill in all three shipping rates");
+      try { await q(sb.from("app_settings").upsert({ key: "shop", value, updated_at: new Date().toISOString() })); toast("Shop settings saved"); pageBack(); }
+      catch (err) { fail(err); }
     };
   });
 }
