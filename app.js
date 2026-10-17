@@ -2017,14 +2017,14 @@ function productForm(p) {
 /* =========================================================
    ONLINE SHOP — orders placed on the shop website, and its settings
    ========================================================= */
-const SHOP_STATUS = { pending: "Waiting for payment", paid: "Paid · to make & ship", packed: "Packed", shipped: "Shipped", cancelled: "Cancelled" };
+const SHOP_STATUS = { pending: "Waiting for payment", paid: "Paid · to make & ship", packed: "Packed", shipped: "Shipped · on the way", delivered: "Delivered", cancelled: "Cancelled" };
 const SHOP_REGION = { semenanjung: "Peninsular Malaysia", sarawak: "Sarawak", sabah: "Sabah", overseas: "Overseas" };
 const waNum = ph => String(ph || "").replace(/\D/g, "").replace(/^0/, "60");
 let shopTab = "todo";
 async function shopOrdersSheet() {
   let orders = [];
   try { orders = await q(live("shop_orders", "*").order("created_at", { ascending: false }).limit(200)); } catch (e) { return fail(e); }
-  const tabs = [["todo", "To do", o => ["pending", "paid", "packed"].includes(o.status)], ["shipped", "Shipped", o => o.status === "shipped"], ["cancelled", "Cancelled", o => o.status === "cancelled"]];
+  const tabs = [["todo", "To do", o => ["pending", "paid", "packed"].includes(o.status)], ["shipped", "Shipped", o => o.status === "shipped"], ["done", "Completed", o => o.status === "delivered"], ["cancelled", "Cancelled", o => o.status === "cancelled"]];
   openSheet(`
     <h2>Shop orders</h2>
     <button class="btn block" id="shopSet">Shop settings</button>
@@ -2047,10 +2047,11 @@ async function shopOrderPage(o) {
   try { items = await q(sb.from("shop_order_items").select("*").eq("order_id", o.id).order("id")); } catch (e) { return fail(e); }
   const made = items.filter(i => !i.ready);
   const addr = [o.address, [o.postcode, o.city].filter(Boolean).join(" "), o.state, o.region === "overseas" ? o.country : ""].filter(Boolean).join(", ");
-  const msg = o.status === "shipped" ? `Hi ${o.customer_name}, your Apolaki order ${o.order_no} is on its way!${o.tracking ? ` Tracking: ${o.tracking}${o.courier ? " (" + o.courier + ")" : ""}` : ""}`
+  const msg = o.status === "delivered" ? `Hi ${o.customer_name}, hope you're enjoying your Apolaki piece! Thank you for your order ${o.order_no}.`
+    : o.status === "shipped" ? `Hi ${o.customer_name}, your Apolaki order ${o.order_no} is on its way!${o.tracking ? ` Tracking: ${o.tracking}${o.courier ? " (" + o.courier + ")" : ""}` : ""}`
     : o.status === "pending" ? `Hi ${o.customer_name}, thank you for your Apolaki order ${o.order_no}.${o.shipping_fee == null ? "" : ` The total is ${RM(o.total)}.`}`
     : `Hi ${o.customer_name}, we've received your payment for Apolaki order ${o.order_no}. Thank you!`;
-  const when = [["Ordered", o.created_at], ["Paid", o.paid_at], ["Packed", o.packed_at], ["Shipped", o.shipped_at]].filter(x => x[1]).map(([l, t]) => `${l} ${ago(t)}`).join(" · ");
+  const when = [["Ordered", o.created_at], ["Paid", o.paid_at], ["Packed", o.packed_at], ["Shipped", o.shipped_at], ["Delivered", o.delivered_at]].filter(x => x[1]).map(([l, t]) => `${l} ${ago(t)}`).join(" · ");
   const PAY = ["DuitNow", "Transfer", "Cash"];
   openSheet(`
     <h2>Order ${esc(o.order_no)}</h2>
@@ -2081,9 +2082,10 @@ async function shopOrderPage(o) {
         <label class="field"><span>Tracking number</span><input id="tracking" value="${esc(o.tracking || "")}"></label></div>
       <button class="btn primary block" id="shipped">Mark shipped</button>
       <p class="small muted" style="margin-top:8px">Takes the pieces out of Workshop stock. Made-to-order pieces that were never added to stock are added and taken out together.</p>` : ""}
-    ${o.status === "shipped" && o.tracking ? `<p class="small" style="margin-top:12px">Tracking: <b>${esc(o.tracking)}</b>${o.courier ? " · " + esc(o.courier) : ""}</p>` : ""}
+    ${["shipped", "delivered"].includes(o.status) && o.tracking ? `<p class="small" style="margin-top:12px">Tracking: <b>${esc(o.tracking)}</b>${o.courier ? " · " + esc(o.courier) : ""}</p>` : ""}
+    ${o.status === "shipped" ? `<button class="btn primary block" id="delivered" style="margin-top:14px">Mark delivered</button><p class="small muted" style="margin-top:8px">Moves the order to Completed.</p>` : ""}
     <label class="field" style="margin-top:16px"><span>Private note</span><input id="anote" value="${esc(o.admin_note || "")}" placeholder="Only you see this"></label>
-    ${o.status !== "cancelled" ? `<button type="button" class="btn danger block" id="cancel" style="margin-top:6px">Cancel order</button>` : ""}`, root => {
+    ${!["cancelled", "delivered"].includes(o.status) ? `<button type="button" class="btn danger block" id="cancel" style="margin-top:6px">Cancel order</button>` : ""}`, root => {
     const act = async (action, p, done) => {
       try {
         const res = await q(sb.rpc("shop_order_action", { p_order: o.id, p_action: action, p: p || {} }));
@@ -2098,6 +2100,7 @@ async function shopOrderPage(o) {
     if ($r("#paid")) $r("#paid").onclick = () => act("paid", { method: pay }, `${o.order_no} paid · sale recorded`);
     if ($r("#packed")) $r("#packed").onclick = () => act("packed", {}, "Marked packed");
     if ($r("#shipped")) $r("#shipped").onclick = () => act("shipped", { courier: $r("#courier").value, tracking: $r("#tracking").value }, `${o.order_no} shipped`);
+    if ($r("#delivered")) $r("#delivered").onclick = () => act("delivered", {}, `${o.order_no} delivered · moved to Completed`);
     if ($r("#cancel")) $r("#cancel").onclick = () => { if (confirm(`Cancel order ${o.order_no}?${o.status !== "pending" ? " Its sale will be removed from your records." : ""}`)) act("cancel", {}, `${o.order_no} cancelled`); };
     $r("#anote").onchange = e => act("note", { note: e.target.value }, "Note saved");
   });
