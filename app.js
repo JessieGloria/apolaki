@@ -118,8 +118,8 @@ function splitShared(skus, qty, have) {
 const shopPrice = (locId, sku) => { const c = state.codes.find(x => x.location_id === Number(locId) && x.sku === sku); return c && c.price != null ? Number(c.price) : Number(prod(sku)?.retail_price || 0); };
 const CAT_ORDER = ["Bracelet", "Earrings", "Ring", "Neck Piece"];
 const CAT_PLURAL = { Bracelet: "Bracelets", Earrings: "Earrings", Ring: "Rings", "Neck Piece": "Neck pieces" };
-const CAT_G = { Bracelet: "g-sky", Earrings: "g-sunset", Ring: "g-coral", "Neck Piece": "g-sea" };
-const catG = c => CAT_G[c] || ["g-mint", "g-dusk", "g-sea"][String(c || "").length % 3];
+const CAT_G = { Bracelet: "n-charcoal", Earrings: "n-stone", Ring: "n-cream", "Neck Piece": "n-taupe" };
+const catG = c => CAT_G[c] || ["n-taupe", "n-stone", "n-charcoal"][String(c || "").length % 3];
 /* small jewellery icons for each category */
 const CAT_SVG = {
   Bracelet: '<ellipse cx="12" cy="12" rx="8.5" ry="6"/><ellipse cx="12" cy="12" rx="5.5" ry="3.6"/>',
@@ -520,9 +520,8 @@ function sizeGroups(products, locId) {
     map.get(key).items.push({ p, size: sz || p.size || "", left: stockAt(locId, p.sku) });
   }
   const list = [...map.values()].map(g => {
-    /* tile name: the short name if one is set (on any size), otherwise the full name without the size */
-    const short = (g.items.find(it => it.p.short_name) || {}).p?.short_name;
-    g.name = g.items.length === 1 ? nice(short || g.items[0].p.name) : nice(baseName(short || g.items[0].p.name));
+    /* tile name: the item's own name (without the size when sizes are grouped) */
+    g.name = g.items.length === 1 ? nice(g.items[0].p.name) : nice(baseName(g.items[0].p.name));
     g.items.sort((a, b) => SIZE_ORDER.indexOf(a.size) - SIZE_ORDER.indexOf(b.size));
     g.left = g.items.reduce((t, it) => t + Math.max(0, it.left), 0);
     return g;
@@ -1912,7 +1911,7 @@ function productsSheet() {
   const row = p => `<div class="row" data-sku="${p.sku}" data-name="${esc(p.name.toLowerCase())}"><div class="grow"><div class="title" style="white-space:normal">${esc(p.name)}</div><div class="small muted">${esc(itemSub(p))}</div></div><span class="num">${RM(p.retail_price)}</span></div>`;
   openSheet(`
     <h2>All items</h2>
-    <button class="btn primary block" id="new">+ New item</button>
+    <div class="two-btn" style="display:grid;grid-template-columns:1fr 1fr;gap:8px"><button class="btn primary block" id="new">+ New item</button><button class="btn block" id="table">Edit as table</button></div>
     <div class="ttabs" style="margin-top:16px">${tabs.map(k => `<button type="button" data-st="${esc(k)}" aria-pressed="${k === itemsTab}">${esc(k)} <span class="muted">${groups[k].length}</span></button>`).join("")}</div>
     <input class="search" id="flt" type="search" placeholder="Search items">
     <div class="list tight" id="itemList" style="margin-top:10px"></div>`, root => {
@@ -1926,9 +1925,11 @@ function productsSheet() {
     root.querySelectorAll("[data-st]").forEach(b => b.onclick = () => { itemsTab = b.dataset.st; root.querySelectorAll("[data-st]").forEach(x => x.setAttribute("aria-pressed", x === b)); root.querySelector("#flt").value = ""; draw(); });
     root.querySelector("#flt").oninput = draw;
     root.querySelector("#new").onclick = () => productForm(null);
+    root.querySelector("#table").onclick = itemsTableSheet;
     draw();
   });
 }
+const NEW_SIZES = [["XS", "Extra Small"], ["S", "Small"], ["M", "Medium"], ["L", "Large"], ["XL", "Extra Large"]];
 function productForm(p) {
   const v = p || { status: "Active" };
   const field = (k, label, type = "text", ph = "") => `<label class="field"><span>${label}</span><input name="${k}" type="${type}" ${type === "number" ? 'step="0.01" min="0" inputmode="decimal"' : ""} placeholder="${ph}" value="${esc(v[k] ?? "")}"></label>`;
@@ -1938,14 +1939,15 @@ function productForm(p) {
   openSheet(`
     <h2>${p ? "Edit item" : "New item"}</h2>
     <form id="f">
-      ${field("name", "Item name", "text", "Twisting Liana Vines Bracelet (Small)")}
-      ${field("short_name", "Short name on Sell (optional)", "text", "e.g. TLV Bracelet")}
-      <p class="small muted" style="margin:-6px 2px 12px">Shown on the Sell tiles so long names fit. For an item with sizes, one size is enough.</p>
+      ${field("name", p ? "Item name" : "Item name (without the size)", "text", p ? "Twisting Liana Vines Bracelet (Small)" : "Twisting Liana Vines Bracelet")}
       <div class="two">${withList("family", "Family", "TLV Bracelet")}${withList("collection", "Collection", "TLV")}</div>
-      <div class="two">${withList("category", "Category", "Bracelet")}${withList("size", "Size", "Small")}</div>
-      <div class="two">${field("retail_price", "Original price (RM)", "number")}
+      <div class="two">${withList("category", "Category", "Bracelet")}${p ? withList("size", "Size", "Small") : ""}</div>
+      ${p ? "" : `<label class="field"><span>Sizes</span></label>
+        <div class="chips size-pick" style="margin-top:-4px">${NEW_SIZES.map(([sh, full]) => `<button type="button" class="chip" data-size="${sh}" aria-pressed="false">${sh}</button>`).join("")}</div>
+        <p class="small muted" style="margin:-4px 2px 12px" id="sizeNote">No size ticked = one item. Tick sizes and each size is saved as its own item.</p>`}
+      <div class="two">${field("retail_price", p ? "Original price (RM)" : "Price (RM)", "number")}
         <label class="field"><span>Status</span><select name="status">${["Active", "Paused", "Replaced", "Discontinued"].map(s => `<option ${v.status === s ? "selected" : ""}>${s}</option>`).join("")}</select></label></div>
-      ${p ? "" : `<label class="field"><span>Pieces made so far (goes into workshop stock)</span><input name="start_qty" type="number" min="0" step="1" inputmode="numeric" placeholder="0"></label>`}
+      ${p ? "" : `<div id="sizeRows"></div><label class="field" id="startOne"><span>Pieces in Workshop now</span><input name="start_qty" type="number" min="0" step="1" inputmode="numeric" placeholder="0"></label>`}
       <label class="field"><span>Photo (optional)</span></label>
       <div class="photo-pick">
         <div class="photo-box" id="photoBox">${photo(v) ? `<img src="${esc(photo(v))}" alt="">` : `<div class="ph ${catG(v.category)}">${catSvg(v.category)}</div>`}</div>
@@ -1967,6 +1969,26 @@ function productForm(p) {
     </form>
     ${p ? `<div id="delMsg"></div><button type="button" class="btn danger block" id="delItem" style="margin-top:10px">Delete item</button>` : ""}`, root => {
     let busy = false;
+    /* new item: tick sizes -> one row per size with its own price (defaults to the main price) and pieces in Workshop */
+    const picked = [], priceTouched = {};
+    const drawSizes = () => {
+      const box = root.querySelector("#sizeRows"); if (!box) return;
+      const base = root.querySelector("[name=retail_price]").value;
+      box.innerHTML = picked.length ? `<div class="card" style="padding:10px 14px;margin:0 0 12px"><table class="simple size-tbl"><tr><th>Size</th><th>Price (RM)</th><th>In Workshop</th></tr>${picked.map(sh => `<tr><td><b>${sh}</b></td>
+        <td><input data-sp="${sh}" type="number" step="0.01" min="0" inputmode="decimal" value="${esc(priceTouched[sh] ?? base)}"></td>
+        <td><input data-sq="${sh}" type="number" step="1" min="0" inputmode="numeric" placeholder="0" value="${esc((box.dataset["q" + sh]) || "")}"></td></tr>`).join("")}</table></div>` : "";
+      box.querySelectorAll("[data-sp]").forEach(i => i.oninput = () => { priceTouched[i.dataset.sp] = i.value; });
+      box.querySelectorAll("[data-sq]").forEach(i => i.oninput = () => { box.dataset["q" + i.dataset.sq] = i.value; });
+      root.querySelector("#startOne").hidden = !!picked.length;
+      root.querySelector("#sizeNote").textContent = picked.length ? `${picked.length} item${picked.length > 1 ? "s" : ""} will be created: ${picked.map(sh => sh).join(", ")}.` : "No size ticked = one item. Tick sizes and each size is saved as its own item.";
+    };
+    root.querySelectorAll("[data-size]").forEach(b => b.onclick = () => {
+      const sh = b.dataset.size, i = picked.indexOf(sh);
+      if (i >= 0) picked.splice(i, 1); else picked.push(sh);
+      picked.sort((a, c) => NEW_SIZES.findIndex(x => x[0] === a) - NEW_SIZES.findIndex(x => x[0] === c));
+      b.setAttribute("aria-pressed", i < 0); drawSizes();
+    });
+    if (!p) root.querySelector("[name=retail_price]").addEventListener("input", drawSizes);
     /* delete = hide (kept in the database). Only for items with no sales or stock history; others should be set to Discontinued */
     const del = root.querySelector("#delItem");
     if (del) del.onclick = async () => {
@@ -2005,20 +2027,165 @@ function productForm(p) {
         else {
           /* next ITM number counts hidden (deleted) items too, so a code is never reused */
           let all = state.products; try { all = await q(sb.from("products").select("sku")); } catch {}
-          f.sku = newKey(all);
-          await q(sb.from("products").insert(f));
-          if (start > 0) await q(sb.from("stock_movements").insert({ sku: f.sku, qty: start, to_location: workshop().id, reason: "restock", notes: "New item" }));
+          all = all.slice();
+          const box = root.querySelector("#sizeRows");
+          const items = picked.length ? picked.map(sh => {
+            const pr = Number(box.querySelector(`[data-sp="${sh}"]`).value), n = parseInt(box.querySelector(`[data-sq="${sh}"]`).value, 10) || 0;
+            return { row: { ...f, family: f.family || f.name, name: `${f.name} - ${sh}`, size: NEW_SIZES.find(x => x[0] === sh)[1], retail_price: isNaN(pr) ? f.retail_price : pr }, n };
+          }) : [{ row: f, n: start }];
+          if (items.some(it => !(it.row.retail_price >= 0))) return toast("Check the prices");
+          for (const it of items) { it.row.sku = newKey(all); all.push({ sku: it.row.sku }); }
+          await q(sb.from("products").insert(items.map(it => it.row)));
+          const mv = items.filter(it => it.n > 0).map(it => ({ sku: it.row.sku, qty: it.n, to_location: workshop().id, reason: "restock", notes: "New item" }));
+          if (mv.length) await q(sb.from("stock_movements").insert(mv));
+          var addedMsg = items.length > 1 ? `${f.name} added in ${items.length} sizes` : (start ? `${f.name} added · ${start} in workshop` : `${f.name} added`);
         }
-        await loadAll(); closeSheet(); toast(p ? "Item saved" : start ? `${f.name} added · ${start} in workshop` : `${f.name} added`); render();
+        await loadAll(); closeSheet(); toast(p ? "Item saved" : addedMsg); render();
       } catch (err) { fail(err); }
     };
   });
 }
 
 /* =========================================================
+   ITEMS TABLE — edit many items at once (the single Edit item page still works)
+   ========================================================= */
+const XT_COLS = [
+  { k: "name", label: "Name", w: 240, type: "text" },
+  { k: "category", label: "Category", w: 120, type: "list" },
+  { k: "collection", label: "Collection", w: 120, type: "list" },
+  { k: "family", label: "Family", w: 140, type: "list" },
+  { k: "size", label: "Size", w: 100, type: "list" },
+  { k: "retail_price", label: "Price (RM)", w: 90, type: "money" },
+  { k: "_stock", label: "Workshop stock", w: 90, type: "int" },
+  { k: "status", label: "Status", w: 120, type: "select", opts: ["Active", "Paused", "Replaced", "Discontinued"] },
+  { k: "show_online", label: "Online", w: 64, type: "check" },
+  { k: "material", label: "Material", w: 110, type: "text" },
+  { k: "dimensions", label: "Dimensions", w: 120, type: "text" },
+  { k: "web_description", label: "Shop description", w: 240, type: "text" }
+];
+let xtState = { tab: "Active", cat: "", q: "", edits: {}, sel: new Set() };
+function itemsTableSheet() {
+  xtState.edits = {}; xtState.sel = new Set();
+  const ws = workshop();
+  const val = (p, k) => k === "_stock" ? stockAt(ws.id, p.sku) : p[k];
+  const cur = (p, k) => (xtState.edits[p.sku] && k in xtState.edits[p.sku]) ? xtState.edits[p.sku][k] : val(p, k);
+  const lists = {}; ["category", "collection", "family", "size"].forEach(k => lists[k] = [...new Set(state.products.map(x => x[k]).filter(Boolean))].sort());
+  const cats = lists.category;
+  openSheet(`
+    <h2>Items table</h2>
+    <div class="xt-page">
+      <p class="small muted" style="margin:-4px 2px 10px">Tap a cell to change it. Changes are highlighted and only saved when you tap Save. Workshop stock changes are recorded as count corrections.</p>
+      <div class="ttabs">${["Active", "Paused", "Replaced", "Discontinued", "All"].map(k => `<button type="button" data-xs="${k}" aria-pressed="${k === xtState.tab}">${k}</button>`).join("")}</div>
+      <div class="xt-tools">
+        <input class="search" id="xtQ" type="search" placeholder="Search items" value="${esc(xtState.q)}">
+        <select id="xtCat"><option value="">All categories</option>${cats.map(c => `<option ${c === xtState.cat ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>
+      </div>
+      <div class="xt-fill" id="xtFill" hidden>
+        <b id="xtSelN"></b>
+        <select id="xtField">${XT_COLS.filter(c => c.k !== "name").map(c => `<option value="${c.k}">${c.label}</option>`).join("")}</select>
+        <span id="xtValBox"></span>
+        <button type="button" class="btn" id="xtApply">Set for selected</button>
+      </div>
+      ${["category", "collection", "family", "size"].map(k => `<datalist id="xt-dl-${k}">${lists[k].map(x => `<option value="${esc(x)}">`).join("")}</datalist>`).join("")}
+      <div class="xt-wrap" id="xtWrap"></div>
+      <div class="xt-bar"><span id="xtCount" class="small muted">No changes</span><button type="button" class="btn" id="xtDiscard" disabled>Discard</button><button type="button" class="btn primary" id="xtSave" disabled>Save changes</button></div>
+    </div>`, root => {
+    const $r = s => root.querySelector(s);
+    const visible = () => {
+      const s = xtState.q.trim().toLowerCase();
+      return state.products.filter(p => (xtState.tab === "All" || (p.status || "Active") === xtState.tab) && (!xtState.cat || p.category === xtState.cat)
+        && (!s || [p.name, p.sku, p.family, p.collection, p.category].join(" ").toLowerCase().includes(s)))
+        .sort((a, b) => (a.category || "").localeCompare(b.category || "") || (a.family || "").localeCompare(b.family || "") || a.name.localeCompare(b.name));
+    };
+    const cell = (p, c) => {
+      const v = cur(p, c.k), dirty = xtState.edits[p.sku] && c.k in xtState.edits[p.sku];
+      const a = `data-sku="${esc(p.sku)}" data-k="${c.k}" class="xt-in${dirty ? " dirty" : ""}"`;
+      if (c.type === "check") return `<td class="c"><input type="checkbox" ${a} ${v ? "checked" : ""}></td>`;
+      if (c.type === "select") return `<td><select ${a}>${c.opts.map(o => `<option ${o === (v || "Active") ? "selected" : ""}>${o}</option>`).join("")}</select></td>`;
+      if (c.type === "money" || c.type === "int") return `<td><input ${a} type="number" inputmode="${c.type === "int" ? "numeric" : "decimal"}" step="${c.type === "int" ? 1 : 0.01}" value="${v ?? ""}"></td>`;
+      if (c.k === "name" || c.k === "web_description") return `<td><textarea ${a} rows="2">${esc(v ?? "")}</textarea></td>`;   /* long text wraps */
+      return `<td><input ${a} ${c.type === "list" ? `list="xt-dl-${c.k}"` : ""} value="${esc(v ?? "")}"></td>`;
+    };
+    const draw = () => {
+      const rows = visible();
+      $r("#xtWrap").innerHTML = rows.length ? `<table class="xt"><thead><tr><th class="xt-sel"><input type="checkbox" id="xtAll" aria-label="Select all"></th><th class="xt-ph"></th>${XT_COLS.map(c => `<th style="min-width:${c.w}px"${c.k === "name" ? ' class="xt-name"' : ""}>${c.label}</th>`).join("")}</tr></thead>
+        <tbody>${rows.map(p => `<tr data-row="${esc(p.sku)}"><td class="xt-sel"><input type="checkbox" data-pick="${esc(p.sku)}" ${xtState.sel.has(p.sku) ? "checked" : ""}></td>
+          <td class="xt-ph">${photo(p) ? `<img src="${esc(photo(p))}" alt="" loading="lazy">` : `<div class="ph ${catG(p.category)}"></div>`}</td>
+          ${XT_COLS.map(c => c.k === "name" ? cell(p, c).replace("<td>", '<td class="xt-name">') : cell(p, c)).join("")}</tr>`).join("")}</tbody></table>`
+        : `<div class="small muted" style="padding:14px 2px">No items here.</div>`;
+      bind(); counts();
+    };
+    const counts = () => {
+      const skus = Object.keys(xtState.edits), n = skus.reduce((t, s) => t + Object.keys(xtState.edits[s]).length, 0);
+      const bad = root.querySelectorAll(".xt-in.bad").length;
+      $r("#xtCount").textContent = n ? `${n} change${n > 1 ? "s" : ""} on ${skus.length} item${skus.length > 1 ? "s" : ""}${bad ? ` · ${bad} to fix` : ""}` : "No changes";
+      $r("#xtSave").disabled = !n || !!bad; $r("#xtDiscard").disabled = !n;
+      $r("#xtSave").textContent = n ? `Save changes (${n})` : "Save changes";
+      $r("#xtFill").hidden = !xtState.sel.size; $r("#xtSelN").textContent = `${xtState.sel.size} selected`;
+    };
+    const setEdit = (sku, k, raw) => {
+      const p = prod(sku), c = XT_COLS.find(x => x.k === k); let v = raw, ok = true;
+      if (c.type === "money") { ok = raw !== "" && !isNaN(Number(raw)) && Number(raw) >= 0; v = ok ? Number(raw) : raw; }
+      else if (c.type === "int") { ok = raw !== "" && Number.isInteger(Number(raw)); v = ok ? Number(raw) : raw; }
+      else if (c.type === "check") v = !!raw;
+      else { v = String(raw).trim(); if (v === "") v = null; if (k === "name" && !v) ok = false; }
+      const orig = val(p, k), same = c.type === "check" ? !!orig === v : (orig ?? null) === (v ?? null) || (c.type === "money" && Number(orig) === v);
+      xtState.edits[sku] = xtState.edits[sku] || {};
+      if (same && ok) delete xtState.edits[sku][k]; else xtState.edits[sku][k] = v;
+      if (!Object.keys(xtState.edits[sku]).length) delete xtState.edits[sku];
+      root.querySelectorAll(`.xt-in[data-sku="${CSS.escape(sku)}"][data-k="${k}"]`).forEach(el => { el.classList.toggle("dirty", !same || !ok); el.classList.toggle("bad", !ok); });
+      counts();
+    };
+    function bind() {
+      root.querySelectorAll(".xt-in").forEach(el => {
+        const ev = el.type === "checkbox" || el.tagName === "SELECT" ? "change" : "input";
+        el.addEventListener(ev, () => setEdit(el.dataset.sku, el.dataset.k, el.type === "checkbox" ? el.checked : el.value));
+      });
+      root.querySelectorAll("[data-pick]").forEach(el => el.onchange = () => { el.checked ? xtState.sel.add(el.dataset.pick) : xtState.sel.delete(el.dataset.pick); counts(); });
+      const all = $r("#xtAll"); if (all) all.onchange = () => { visible().forEach(p => all.checked ? xtState.sel.add(p.sku) : xtState.sel.delete(p.sku)); draw(); };
+    }
+    const valBox = () => {
+      const c = XT_COLS.find(x => x.k === $r("#xtField").value);
+      $r("#xtValBox").innerHTML = c.type === "check" ? `<select id="xtVal"><option value="1">Ticked</option><option value="">Not ticked</option></select>`
+        : c.type === "select" ? `<select id="xtVal">${c.opts.map(o => `<option>${o}</option>`).join("")}</select>`
+        : `<input id="xtVal" ${c.type === "money" || c.type === "int" ? 'type="number" inputmode="decimal"' : ""} ${c.type === "list" ? `list="xt-dl-${c.k}"` : ""} placeholder="New value">`;
+    };
+    $r("#xtField").onchange = valBox; valBox();
+    $r("#xtApply").onclick = () => {
+      const k = $r("#xtField").value, raw = $r("#xtVal").value, c = XT_COLS.find(x => x.k === k);
+      [...xtState.sel].forEach(sku => setEdit(sku, k, c.type === "check" ? !!raw : raw));
+      draw(); toast(`${XT_COLS.find(x => x.k === k).label} set for ${xtState.sel.size} item${xtState.sel.size > 1 ? "s" : ""}`);
+    };
+    root.querySelectorAll("[data-xs]").forEach(b => b.onclick = () => { xtState.tab = b.dataset.xs; root.querySelectorAll("[data-xs]").forEach(x => x.setAttribute("aria-pressed", x === b)); draw(); });
+    $r("#xtCat").onchange = e => { xtState.cat = e.target.value; draw(); };
+    $r("#xtQ").oninput = e => { xtState.q = e.target.value; clearTimeout(draw.t); draw.t = setTimeout(draw, 150); };
+    $r("#xtDiscard").onclick = () => { if (!confirm("Discard all unsaved changes?")) return; xtState.edits = {}; draw(); };
+    $r("#xtSave").onclick = async () => {
+      const btn = $r("#xtSave"); btn.disabled = true; btn.textContent = "Saving…";
+      const jobs = [], moves = [];
+      for (const [sku, ch] of Object.entries(xtState.edits)) {
+        const { _stock, ...fields } = ch;
+        if (Object.keys(fields).length) jobs.push(() => q(sb.from("products").update(fields).eq("sku", sku)));
+        if (_stock !== undefined) {
+          const have = stockAt(ws.id, sku), d = _stock - have;
+          if (d) moves.push({ moved_on: ymd(new Date()), sku, qty: Math.abs(d), [d > 0 ? "to_location" : "from_location"]: ws.id, reason: "correction", notes: `Count fixed in items table (${have} → ${_stock})` });
+        }
+      }
+      try {
+        for (let i = 0; i < jobs.length; i += 6) await Promise.all(jobs.slice(i, i + 6).map(f => f()));
+        if (moves.length) await q(sb.from("stock_movements").insert(moves));
+        const n = Object.keys(xtState.edits).length;
+        xtState.edits = {}; await loadAll(); toast(`${n} item${n > 1 ? "s" : ""} saved`); draw();
+      } catch (e) { fail(e); counts(); }
+    };
+    draw();
+  });
+}
+
+/* =========================================================
    ONLINE SHOP — orders placed on the shop website, and its settings
    ========================================================= */
-const SHOP_STATUS = { pending: "Waiting for payment", paid: "Paid · to make & ship", packed: "Packed", shipped: "Shipped · on the way", delivered: "Delivered", cancelled: "Cancelled" };
+const SHOP_STATUS = { pending: "Waiting for payment", paid: "Paid · to pack & ship", packed: "Packed", shipped: "Shipped · on the way", delivered: "Delivered", cancelled: "Cancelled" };
 const SHOP_REGION = { semenanjung: "Peninsular Malaysia", sarawak: "Sarawak", sabah: "Sabah", overseas: "Overseas" };
 const waNum = ph => String(ph || "").replace(/\D/g, "").replace(/^0/, "60");
 let shopTab = "todo";
@@ -2099,7 +2266,7 @@ async function shopOrderPage(o, items) {
       <a class="btn block" style="margin-top:12px" href="https://wa.me/${waNum(o.phone)}?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">WhatsApp ${esc(o.customer_name.split(" ")[0])}</a>
     </div>
     <div class="list tight" style="margin-top:12px">${items.map(i => `<div class="row"><div class="grow"><div class="title" style="white-space:normal">${i.qty}× ${esc(nice(i.name))}</div>
-      <div class="small muted">${i.size && !/^(free|assorted)$/i.test(i.size) ? esc(i.size) + " · " : ""}${i.ready ? "Was ready to ship" : "Made to order"}</div></div><span class="num">${RM(i.qty * i.unit_price)}</span></div>`).join("")}
+      <div class="small muted">${i.size && !/^(free|assorted)$/i.test(i.size) ? esc(i.size) + " · " : ""}Qty ${i.qty}</div></div><span class="num">${RM(i.qty * i.unit_price)}</span></div>`).join("")}
       <div class="row"><div class="grow"><div class="title">Shipping</div></div><span class="num">${o.shipping_fee == null ? "Not set" : RM(o.shipping_fee)}</span></div>
       <div class="row"><div class="grow"><div class="title">Total</div></div><span class="num"><b>${RM(Number(o.subtotal) + Number(o.shipping_fee || 0))}</b></span></div></div>
     ${o.status === "pending" ? `
@@ -2110,15 +2277,16 @@ async function shopOrderPage(o, items) {
       <button class="btn primary block" id="paid" ${o.shipping_fee == null ? "disabled" : ""}>Confirm payment · ${RM(Number(o.subtotal) + Number(o.shipping_fee || 0))}</button>
       <p class="small muted" style="margin-top:8px">${o.shipping_fee == null ? "Save the shipping fee first, then WhatsApp the customer the total. " : ""}Records the sale as an online order. Stock leaves the Workshop when you mark it shipped.</p>` : ""}
     ${["paid", "packed"].includes(o.status) ? `
-      ${made.length ? `<div class="warn-banner" style="margin-top:14px">To make: ${made.map(i => `${i.qty}× ${esc(nice(i.name))}`).join(", ")}</div>` : ""}
       ${o.status === "paid" ? `<button class="btn primary block" id="packed" style="margin-top:12px">Mark packed</button>
         <p class="small muted" style="margin-top:8px">Pack the order first. Shipping opens after it's packed.</p>` : `
       <h3 style="margin-top:16px">Ship it</h3>
       <div class="two"><label class="field"><span>Courier</span><input id="courier" placeholder="Pos Laju, J&amp;T…" value="${esc(o.courier || "")}"></label>
         <label class="field"><span>Tracking number</span><input id="tracking" value="${esc(o.tracking || "")}"></label></div>
+      <label class="field"><span>Actual postage paid (RM, optional)</span><input id="postage" type="number" step="0.01" min="0" inputmode="decimal" placeholder="Customer paid ${o.shipping_fee != null ? RM(o.shipping_fee) : "–"}"></label>
       <button class="btn primary block" id="shipped">Mark shipped</button>
-      <p class="small muted" style="margin-top:8px">Takes the pieces out of Workshop stock. Made-to-order pieces that were never added to stock are added and taken out together.</p>`}` : ""}
+      <p class="small muted" style="margin-top:8px">Takes the pieces out of Workshop stock. Actual postage is saved as a Postage expense, so Accounts shows what's left of the shipping charge.</p>`}` : ""}
     ${["shipped", "delivered"].includes(o.status) && o.tracking ? `<p class="small" style="margin-top:12px">Tracking: <b>${esc(o.tracking)}</b>${o.courier ? " · " + esc(o.courier) : ""}</p>` : ""}
+    ${["shipped", "delivered"].includes(o.status) && o.postage_cost != null ? `<p class="small muted" style="margin-top:4px">Postage paid ${RM(o.postage_cost)} · customer paid ${RM(o.shipping_fee || 0)} · kept ${RM(Number(o.shipping_fee || 0) - Number(o.postage_cost))}</p>` : ""}
     ${o.status === "shipped" ? `<button class="btn primary block" id="delivered" style="margin-top:14px">Mark delivered</button><p class="small muted" style="margin-top:8px">Moves the order to Completed.</p>` : ""}
     <label class="field" style="margin-top:16px"><span>Private note</span><input id="anote" value="${esc(o.admin_note || "")}" placeholder="Only you see this"></label>
     ${!["cancelled", "delivered"].includes(o.status) ? `<button type="button" class="btn danger block" id="cancel" style="margin-top:6px">Cancel order</button>` : ""}`, root => {
@@ -2144,7 +2312,7 @@ async function shopOrderPage(o, items) {
     if ($r("#saveFee")) $r("#saveFee").onclick = () => { const v = $r("#fee").value; if (v === "") return toast("Enter the shipping fee"); act("shipping", { fee: Number(v) }, "Shipping fee saved"); };
     if ($r("#paid")) $r("#paid").onclick = () => act("paid", { method: pay }, `${o.order_no} paid · sale recorded`);
     if ($r("#packed")) $r("#packed").onclick = () => act("packed", {}, "Marked packed");
-    if ($r("#shipped")) $r("#shipped").onclick = () => act("shipped", { courier: $r("#courier").value, tracking: $r("#tracking").value }, `${o.order_no} shipped`);
+    if ($r("#shipped")) $r("#shipped").onclick = () => act("shipped", { courier: $r("#courier").value, tracking: $r("#tracking").value, postage: $r("#postage").value }, `${o.order_no} shipped`);
     if ($r("#delivered")) $r("#delivered").onclick = () => act("delivered", {}, `${o.order_no} delivered · moved to Completed`);
     if ($r("#cancel")) $r("#cancel").onclick = () => { if (confirm(`Cancel order ${o.order_no}?${o.status !== "pending" ? " Its sale will be removed from your records." : ""}`)) act("cancel", {}, `${o.order_no} cancelled`); };
     $r("#anote").onchange = e => act("note", { note: e.target.value }, "Note saved");
@@ -2170,10 +2338,10 @@ async function shopSettingsSheet() {
           ${s.duitnow_qr ? `<button type="button" class="link" id="noQr" style="color:var(--rust)">Remove</button>` : ""}</div>
       </div>
       <input type="hidden" name="duitnow_qr" id="qrVal" value="${esc(s.duitnow_qr || "")}">
-      <h3 style="margin-top:16px">Shipping</h3>
+      <h3 style="margin-top:16px">Standard shipping</h3>
       <div class="two">${f("r_semenanjung", "Peninsular (RM)", rates.semenanjung, 'type="number" step="0.01" min="0" inputmode="decimal"')}${f("r_sarawak", "Sarawak (RM)", rates.sarawak, 'type="number" step="0.01" min="0" inputmode="decimal"')}</div>
-      <div class="two">${f("r_sabah", "Sabah (RM)", rates.sabah, 'type="number" step="0.01" min="0" inputmode="decimal"')}${f("lead_days", "Made to order ships within (days)", s.lead_days ?? 7, 'type="number" min="1" step="1" inputmode="numeric"')}</div>
-      <p class="small muted">Overseas shipping is quoted per order on WhatsApp.</p>
+      <div class="two">${f("r_sabah", "Sabah (RM)", rates.sabah, 'type="number" step="0.01" min="0" inputmode="decimal"')}<div></div></div>
+      <p class="small muted">Standard shipping charged at checkout. Overseas shipping is quoted per order on WhatsApp.</p>
       <h3 style="margin-top:16px">Website text</h3>
       ${f("banner_title", "Homepage headline", s.banner_title, 'placeholder="Shaped by hand, made for you."')}
       ${f("banner_text", "Homepage line under the headline", s.banner_text, 'placeholder="Bracelets, earrings and rings crafted in brass by Jason Labunda."')}
@@ -2196,7 +2364,7 @@ async function shopSettingsSheet() {
       const v = Object.fromEntries(new FormData(e.target)); for (const k in v) v[k] = String(v[k]).trim();
       const num = x => x === "" ? null : Number(x);
       const value = { ...s, whatsapp: v.whatsapp, bank_name: v.bank_name, account_name: v.account_name, account_no: v.account_no, duitnow_qr: v.duitnow_qr,
-        lead_days: num(v.lead_days) || 7, banner_title: v.banner_title, banner_text: v.banner_text, returns_text: v.returns_text, shop_url: v.shop_url && !/^https?:\/\//i.test(v.shop_url) ? "https://" + v.shop_url : v.shop_url, rates: { semenanjung: num(v.r_semenanjung), sarawak: num(v.r_sarawak), sabah: num(v.r_sabah) } };
+        banner_title: v.banner_title, banner_text: v.banner_text, returns_text: v.returns_text, shop_url: v.shop_url && !/^https?:\/\//i.test(v.shop_url) ? "https://" + v.shop_url : v.shop_url, rates: { semenanjung: num(v.r_semenanjung), sarawak: num(v.r_sarawak), sabah: num(v.r_sabah) } };
       if (Object.values(value.rates).some(r => r == null)) return toast("Fill in all three shipping rates");
       try { await q(sb.from("app_settings").upsert({ key: "shop", value, updated_at: new Date().toISOString() })); toast("Shop settings saved"); shopSettingsSheet(); }
       catch (err) { fail(err); }
