@@ -1191,7 +1191,7 @@ async function renderRetailer() {
   const bindHead = () => {
     $("#back").onclick = () => go("retailers");
     view.querySelectorAll("[data-rt]").forEach(b => b.onclick = () => { state.rTab = b.dataset.rt; state.rFilter = null; renderRetailer(); });
-    view.querySelectorAll("[data-a]").forEach(b => b.onclick = () => ({ paste: pasteSalesSheet, tally: tallySheet, pay: payoutsSheet, send: sendStockSheet, codes: toggleCodes })[b.dataset.a](r));
+    view.querySelectorAll("[data-a]").forEach(b => b.onclick = () => ({ paste: pasteSalesSheet, tally: tallySheet, pay: payoutsSheet, send: sendStockSheet, codes: toggleCodes, store: storeListSheet })[b.dataset.a](r));
   };
   const draw = d => {
     state.rPays = d.pays || [];
@@ -1268,22 +1268,66 @@ function rDashboard(r, d, items) {
       ${Object.entries(cats).sort((a, b) => b[1].a - a[1].a).map(([k, c]) => `<tr><td>${esc(k)}</td><td class="r">${c.u}</td><td class="r">${RM(c.a)}</td><td class="r">${RM(c.a * (1 - rate))}</td><td class="r">${c.s}</td><td class="r">${pct(c.u + c.s ? c.u / (c.u + c.s) : null)}</td></tr>`).join("")}</table></div>`;
 }
 
+/* ---------- store list: the must-have pieces for each retailer ---------- */
+const mustHave = (locId, it) => (it.shared ? it.shared.skus : [it.sku]).some(sku => !!codeRow(locId, sku)?.must_have);
+async function setMustHave(r, skus, on) {
+  await q(sb.from("retailer_codes").upsert(skus.map(sku => ({ location_id: r.id, sku, must_have: on })), { onConflict: "location_id,sku" }));
+  skus.forEach(sku => { const c = codeRow(r.id, sku); if (c) c.must_have = on; else state.codes.push({ location_id: r.id, sku, code: null, price: null, must_have: on }); });
+  localSet("codes", state.codes);
+}
+function storeListSheet(r) {
+  const items = state.products.filter(p => p.status === "Active" || codeRow(r.id, p.sku)?.must_have).sort((a, b) => a.name.localeCompare(b.name));
+  const picked = new Set(items.filter(p => codeRow(r.id, p.sku)?.must_have).map(p => p.sku)), start = new Set(picked);
+  openSheet(`
+    <h2>${esc(r.name)} store list</h2>
+    <p class="small muted" style="margin:-4px 2px 12px">Tick the pieces ${esc(r.name)} should always have. Only these show under <b>Sold out</b> when they run out there. Unticking keeps all history.</p>
+    <input class="search" id="slQ" type="search" placeholder="Search items">
+    <div id="slList" style="margin-top:10px"></div>
+    <div class="xt-bar"><span id="slN" class="small muted"></span><button type="button" class="btn primary" id="slSave">Save store list</button></div>`, root => {
+    const draw = () => {
+      const s = root.querySelector("#slQ").value.trim().toLowerCase();
+      const list = items.filter(p => !s || p.name.toLowerCase().includes(s) || (p.family || "").toLowerCase().includes(s));
+      root.querySelector("#slList").innerHTML = groupByCategory(list).map(([cat, ps]) => `<h3 style="margin:16px 2px 6px">${esc(CAT_PLURAL[cat] || cat)}</h3>
+        <div class="list tight card" style="padding:0 14px">${ps.map(p => `<label class="row" style="cursor:pointer"><div class="grow"><div class="title">${esc(p.name)}</div>
+          <div class="small muted">${esc(itemSub(p))}${p.status !== "Active" ? " · " + esc(p.status) : ""} · on shelf ${stockAt(r.id, p.sku)}</div></div>
+          <input type="checkbox" data-sl="${esc(p.sku)}" ${picked.has(p.sku) ? "checked" : ""} style="width:22px;height:22px;min-height:0;flex:none;padding:0;box-shadow:none;accent-color:var(--accent)"></label>`).join("")}</div>`).join("") || `<div class="small muted">No items.</div>`;
+      root.querySelectorAll("[data-sl]").forEach(c => c.onchange = () => { c.checked ? picked.add(c.dataset.sl) : picked.delete(c.dataset.sl); count(); });
+    };
+    const count = () => {
+      const ch = [...items].filter(p => picked.has(p.sku) !== start.has(p.sku)).length;
+      root.querySelector("#slN").textContent = `${picked.size} on the list${ch ? ` · ${ch} change${ch > 1 ? "s" : ""}` : ""}`;
+      root.querySelector("#slSave").disabled = !ch;
+    };
+    root.querySelector("#slQ").oninput = draw;
+    root.querySelector("#slSave").onclick = async () => {
+      const on = items.filter(p => picked.has(p.sku) && !start.has(p.sku)).map(p => p.sku), off = items.filter(p => !picked.has(p.sku) && start.has(p.sku)).map(p => p.sku);
+      try { if (on.length) await setMustHave(r, on, true); if (off.length) await setMustHave(r, off, false); toast("Store list saved"); closeSheet(); render(); } catch (e) { fail(e); }
+    };
+    draw(); count();
+  });
+}
+
 function rStock(r, d, items) {
   items = collapseShared(items);
   const f = state.rFilter || "in";
-  const list = items.filter(i => f === "all" ? true : f === "in" ? i.current > 0 : f === "nocode" ? !i.code : i.current <= 0);
+  const isDisc = i => ["Discontinued", "Replaced"].includes(i.p.status) && i.current > 0;
+  const isOut = i => i.current <= 0 && mustHave(r.id, i);
+  const list = items.filter(i => f === "all" ? true : f === "in" ? i.current > 0 : f === "nocode" ? !i.code : f === "disc" ? isDisc(i) : isOut(i));
+  const nList = state.codes.filter(c => c.location_id === r.id && c.must_have).length;
   const total = items.reduce((t, i) => t + Math.max(0, i.current), 0), value = items.reduce((t, i) => t + Math.max(0, i.value), 0);
   const noCode = usesCodes(r) ? items.filter(i => !i.code && i.current > 0).length : 0;
   return `
     <div class="figures"><div class="figure"><div class="label">Pieces on shelf</div><div class="value">${total}</div></div><div class="figure"><div class="label">Stock value</div><div class="value">${RM(value)}</div></div></div>
     ${!usesCodes(r) ? `<p class="small muted" style="margin:0 2px 10px">${esc(r.name)} doesn't use item codes. <button type="button" class="link" data-a="codes">Turn codes on</button></p>` : ""}
     ${noCode ? `<div class="warn-banner">${noCode} item${noCode > 1 ? "s" : ""} on the shelf still need${noCode > 1 ? "" : "s"} a ${esc(r.name)} code (<button type="button" class="link" data-a="codes">shop doesn't use codes?</button>). Tap to add it.</div>` : ""}
-    <div class="chips" style="margin-top:0">${[["in", "In stock"], ["out", "Sold out"], ...(usesCodes(r) ? [["nocode", "No code"]] : []), ["all", "All"]].map(([k, l]) => `<button class="chip" data-f="${k}" aria-pressed="${f === k}">${l}</button>`).join("")}</div>
+    <button type="button" class="btn block" data-a="store" style="margin:0 0 12px">Edit store list · ${nList} must-have piece${nList === 1 ? "" : "s"}</button>
+    <div class="chips" style="margin-top:0">${[["in", "In stock", items.filter(i => i.current > 0).length], ["out", "Sold out", items.filter(isOut).length], ["disc", "Discontinued", items.filter(isDisc).length], ...(usesCodes(r) ? [["nocode", "No code", null]] : []), ["all", "All", null]].map(([k, l, n]) => `<button class="chip" data-f="${k}" aria-pressed="${f === k}">${l}${n != null ? ` · ${n}` : ""}</button>`).join("")}</div>
+    ${f === "out" ? `<p class="small muted" style="margin:-4px 2px 10px">Store-list pieces with none left at ${esc(r.name)}.</p>` : f === "disc" ? `<p class="small muted" style="margin:-4px 2px 10px">Discontinued or replaced pieces still on ${esc(r.name)}'s shelf: collect or sell off.</p>` : ""}
     ${groupByCategory(list.map(i => i.p)).map(([cat, ps]) => { const its = ps.map(p => list.find(i => i.sku === p.sku)); const n = its.reduce((t, i) => t + Math.max(0, i.current), 0);
       return `<details class="group" data-key="rs:${esc(cat)}"><summary>${catIco(cat)}<span class="grow">${esc(cat)}<span class="small muted" style="display:block;font-weight:500">${its.length} item${its.length > 1 ? "s" : ""} · ${RM(its.reduce((t, i) => t + Math.max(0, i.value), 0))}</span></span><span class="count">${n}</span>${CHEV}</summary>
       <div class="inner">${its.map(i => `<div class="row" data-item="${i.sku}"><div class="grow"><div class="title" style="white-space:normal">${esc(i.p.name)}</div>
       <div class="small muted">${codeChip(i)} In ${i.stockIn} · Sold ${i.sold} · ${RM(i.price)}${i.current > 0 ? ` · Value ${RM(i.value)}` : ""}${i.sharedRow ? ` · ${i.shared.code ? "one shop code for" : "sizes together:"} ${esc(i.shared.sizes.join(", "))}` : ""}</div>
-      <div style="margin-top:5px">${tag(i.action, ACTION_TONE[i.action])}</div></div>
+      <div style="margin-top:5px">${tag(i.action, ACTION_TONE[i.action])}${mustHave(r.id, i) ? " " + tag("Store list", "") : ""}</div></div>
       <span class="num" style="font-size:20px;font-weight:700;${i.current <= 0 ? "color:var(--rust)" : ""}">${i.current}</span></div>`).join("")}</div></details>`; }).join("") || `<div class="empty">Nothing here.</div>`}`;
 }
 
@@ -1394,7 +1438,13 @@ function itemAtRetailerSheet(r, it) {
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">${clsTag(it)}${tag(it.action, ACTION_TONE[it.action])}${tag(it.stockStatus)}</div>
     <p class="small muted" style="margin:-6px 2px 6px">${esc(it.cls.why)}</p>
     ${it.cls.next ? `<p class="small" style="margin:0 2px 14px"><b>Next:</b> ${esc(it.cls.next)}</p>` : ""}
+    <label class="row" style="margin:0 0 12px;cursor:pointer"><div class="grow"><div class="title">On the ${esc(r.name)} store list</div><div class="small muted">Must-have piece: shows under Sold out when it runs out here</div></div>
+      <input type="checkbox" id="mh" ${mustHave(r.id, it) ? "checked" : ""} style="width:22px;height:22px;min-height:0;flex:none;padding:0;box-shadow:none;accent-color:var(--accent)"></label>
     <div class="btns"><button class="btn" id="adj">Fix count</button><button class="btn" id="edit">Edit item</button></div>`, root => {
+    root.querySelector("#mh").onchange = async e => {
+      try { await setMustHave(r, sh ? sh.skus : [p.sku], e.target.checked); toast(e.target.checked ? "Added to the store list" : "Taken off the store list"); render(); }
+      catch (err) { e.target.checked = !e.target.checked; fail(err); }
+    };
     root.querySelector("#cf").onsubmit = async e => {
       e.preventDefault();
       const code = coded ? root.querySelector("#code").value.trim().toUpperCase() || null : (it.code || null);
