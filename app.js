@@ -1204,7 +1204,7 @@ async function renderRetailer() {
     view.querySelectorAll("[data-item]").forEach(e => e.onclick = ev => { ev.preventDefault(); itemAtRetailerSheet(r, items.find(i => i.sku === e.dataset.item)); });
     /* switching sub-tabs, filters and months redraws from memory: no waiting, no jump */
     view.querySelectorAll("[data-rt]").forEach(b => b.onclick = () => { state.rTab = b.dataset.rt; state.rFilter = null; draw(d); });
-    view.querySelectorAll("[data-f]").forEach(b => b.onclick = () => { state.rFilter = b.dataset.f === "all" ? null : b.dataset.f; draw(d); });
+    view.querySelectorAll("[data-f]").forEach(b => b.onclick = () => { state.rFilter = b.dataset.f; draw(d); });
     view.querySelectorAll("[data-mon]").forEach(b => b.onclick = () => { state.rMonth = b.dataset.mon; draw(d); });
   };
   const cached = localGet("rdata:" + r.id, null);
@@ -1376,7 +1376,7 @@ function rSales(r, d) {
 }
 
 function rAnalysis(r, d, items) {
-  const f = state.rFilter;
+  const f = state.rFilter === "all" ? null : state.rFilter;   /* "All" = no filter */
   /* one entry per design; sizes are listed inside it */
   const designs = [];
   for (const i of items) {

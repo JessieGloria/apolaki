@@ -498,3 +498,12 @@ table.xt { border-collapse: separate; border-spacing: 0; font-size: 12.5px; min-
 .xt-bar { position: sticky; bottom: 0; display: flex; align-items: center; gap: 8px; padding: 12px 2px calc(12px + env(safe-area-inset-bottom, 0px)); background: linear-gradient(rgba(243,248,251,0), var(--bg) 30%); }
 .xt-bar span { flex: 1; }
 .xt-bar .btn:disabled { opacity: .45; }
+
+/* ---------- category colours follow the app style (same as the other tabs) ---------- */
+:root { --n-charcoal: linear-gradient(165deg, #e7f4f6 0%, #cfe7eb 100%); --n-stone: var(--n-charcoal); --n-cream: var(--n-charcoal); --n-taupe: var(--n-charcoal); }
+.sell-tabs .ctab, .sell-tabs .ctab.n-charcoal, .sell-tabs .ctab.n-stone, .sell-tabs .ctab.n-cream, .sell-tabs .ctab.n-taupe, .sell-tabs .ctab.c-all {
+  background: var(--panel); color: var(--muted); opacity: 1; box-shadow: var(--shadow); font-weight: 600; }
+.sell-tabs .ctab[aria-pressed="true"] { background: var(--accent) !important; color: #fff !important; box-shadow: 0 6px 14px rgba(111,184,195,.35); }
+.cat-pill, .cat-pill.n-cream { background: var(--accent-bg) !important; color: var(--accent-ink) !important; font-weight: 700; }
+.cat-bar { background: var(--accent) !important; }
+.tile .ph[class*="n-"]::before { background: rgba(255,255,255,.35); }
