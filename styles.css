@@ -507,3 +507,13 @@ table.xt { border-collapse: separate; border-spacing: 0; font-size: 12.5px; min-
 .cat-pill, .cat-pill.n-cream { background: var(--accent-bg) !important; color: var(--accent-ink) !important; font-weight: 700; }
 .cat-bar { background: var(--accent) !important; }
 .tile .ph[class*="n-"]::before { background: rgba(255,255,255,.35); }
+
+/* edit a sale (market POS) */
+.es-line { padding: 14px 14px 10px; margin-bottom: 12px; }
+.es-line .field { margin-bottom: 8px; }
+.es-hint { margin: -2px 0 6px; }
+.es-rm { background: none; border: 0; padding: 4px 0; color: var(--rust); font-size: 13px; }
+.sale-day { display: flex; justify-content: space-between; align-items: baseline; margin: 16px 2px 6px; font-size: 13px; }
+.sale-day span { color: var(--muted); font-size: 12px; }
+.row.tap { cursor: pointer; }
+.row.tap .chev { margin-left: 6px; color: var(--muted); }

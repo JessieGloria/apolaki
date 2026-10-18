@@ -763,9 +763,10 @@ async function todaySheet(t) {
       ${Object.entries(byPay).map(([k, v]) => `<div class="figure"><div class="label">${esc(k)}</div><div class="value">${RM(v)}</div></div>`).join("")}</div>
     <div class="list tight">${Object.entries(carts).map(([k, c]) => `<div class="row"><div class="grow"><div class="title">${c.rows.map(r => `${r.qty || 1}× ${esc(nice(prod(r.sku)?.name || r.description || r.sku || "Piece"))}`).join(", ")}</div>
       <div class="small muted">${new Date(c.at).toLocaleTimeString("en-MY", { hour: "numeric", minute: "2-digit" })} · ${esc(c.pay || "")}</div></div>
-      <span class="num">${RM(c.rows.reduce((x, r) => x + Number(r.amount), 0))}</span><button class="link" data-cart="${esc(k)}" style="background:none;border:0;color:var(--rust)">Remove</button></div>`).join("") || `<div class="empty">No sales yet today.</div>`}</div>
+      <span class="num">${RM(c.rows.reduce((x, r) => x + Number(r.amount), 0))}</span><button class="link" data-edit="${esc(k)}" style="background:none;border:0">Edit</button><button class="link" data-cart="${esc(k)}" style="background:none;border:0;color:var(--rust)">Remove</button></div>`).join("") || `<div class="empty">No sales yet today.</div>`}</div>
     <button class="btn block" id="close">Close</button>`, root => {
     root.querySelector("#close").onclick = closeSheet;
+    root.querySelectorAll("[data-edit]").forEach(b => b.onclick = () => saleEditSheet(carts[b.dataset.edit].rows, { where: t.name, done: () => { todaySheet(t); render(); } }));
     root.querySelectorAll("[data-cart]").forEach(b => b.onclick = async () => {
       if (!confirm("Remove this sale? The pieces go back into stock.")) return;
       const k = b.dataset.cart;
@@ -781,7 +782,7 @@ async function todaySheet(t) {
    ========================================================= */
 async function loadMarketData() {
   const [sales, fees] = await Promise.all([
-    q(live("sales", "id,sold_at,amount,qty,sku,payment_method,location_id,cart_id,client_id,notes,description").eq("channel", "market")),
+    q(live("sales", "id,sold_at,amount,qty,sku,unit_price,payment_method,location_id,channel,cart_id,client_id,notes,description").eq("channel", "market")),
     q(live("expenses", "spent_on,amount,description,paid_to").eq("category", "Market Fee"))
   ]);
   /* sales still waiting on this phone count too */
@@ -841,6 +842,8 @@ function marketDetailSheet(x, all) {
   x.sl.forEach(s => { const p = s.sku ? prod(s.sku) : null; const k = p ? nice(baseName(p.name)) : (s.description || "Other piece"); const o = by[k] = by[k] || { name: k, qty: 0, amt: 0, cat: p?.category }; o.qty += s.qty || 0; o.amt += Number(s.amount); });
   const items = Object.values(by).filter(o => o.name !== "Other piece" || o.qty).sort((a, b) => b.qty - a.qty || b.amt - a.amt);
   const cats = {}; items.forEach(o => { const k = o.cat || "Other"; cats[k] = (cats[k] || 0) + o.amt; });
+  const saleCarts = groupSales(x.sl), saleDays = [];
+  Object.values(saleCarts).sort((a, b) => String(b.at).localeCompare(String(a.at))).forEach(c => { const dd = ymd(new Date(c.at)); const g = saleDays.find(s => s[0] === dd); g ? g[1].push(c) : saleDays.push([dd, [c]]); });
   openSheet(`
     <h2>${esc(m.name)}</h2>
     <p class="small muted" style="margin-top:-6px">${x.dayList.length ? `${x.dayList.map(dd => shortDate(dd)).join(", ")} ${x.dayList[0].slice(0, 4)}` : "Dates not set"}${m.venue ? ` · ${esc(m.venue)}` : ""}${x.running ? " · running now" : ""}</p>
@@ -861,7 +864,113 @@ function marketDetailSheet(x, all) {
     ${Object.keys(x.pay).length ? `<h3>Payments</h3><div class="card"><table class="simple">${Object.entries(x.pay).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr><td>${esc(k)}</td><td class="r">${RM(v)}</td><td class="r muted">${Math.round(v / x.total * 100)}%</td></tr>`).join("")}</table></div>` : ""}
     ${x.itemised ? `<h3>What sold</h3><div class="card"><table class="simple"><tr><th>Piece</th><th class="r">Sold</th><th class="r">Sales</th></tr>${items.map(o => `<tr><td>${o.cat ? `<span class="cat-bar ${catG(o.cat)}"></span> ` : ""}${esc(o.name)}</td><td class="r">${o.qty}</td><td class="r">${RM(o.amt)}</td></tr>`).join("")}</table></div>
       <h3>By category</h3><div class="card"><table class="simple">${Object.entries(cats).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr><td>${esc(CAT_PLURAL[k] || k)}</td><td class="r">${RM(v)}</td><td class="r muted">${x.total ? Math.round(v / x.total * 100) : 0}%</td></tr>`).join("")}</table></div>` : ""}
-  `);
+    ${saleDays.length ? `<h3>All sales</h3><p class="small muted" style="margin-top:-4px">Tap a sale to fix the piece, size, quantity, price or payment.</p>
+      ${saleDays.map(([dd, cs]) => `<div class="sale-day"><b>${new Date(dd + "T00:00").toLocaleDateString("en-MY", { weekday: "short", day: "numeric", month: "short" })}</b><span>${cs.length} sale${cs.length > 1 ? "s" : ""} · ${RM(cs.reduce((t, c) => t + c.total, 0))}</span></div>
+        <div class="list tight">${cs.map(c => `<div class="row tap" data-sale="${esc(c.k)}" role="button" tabindex="0"><div class="grow"><div class="title" style="white-space:normal">${esc(saleLabel(c.rows))}</div>
+          <div class="small muted">${new Date(c.at).toLocaleTimeString("en-MY", { hour: "numeric", minute: "2-digit" })}${c.pay ? " · " + esc(c.pay) : ""}${c.rows.some(r => !r.id) ? " · on this phone" : ""}</div></div>
+          <span class="num">${RM(c.total)}</span>${CHEV}</div>`).join("")}</div>`).join("")}` : ""}
+  `, root => {
+    root.querySelectorAll("[data-sale]").forEach(r => r.onclick = () => saleEditSheet(saleCarts[r.dataset.sale].rows, { where: m.name, done: () => refreshMarketDetail(m.id) }));
+  });
+}
+/* reload a market's numbers after a sale was fixed, and show its page again */
+async function refreshMarketDetail(id) {
+  let d; try { d = await loadMarketData(); localSet("mdata", d); } catch (e) { return fail(e); }
+  const list = state.locations.filter(l => l.type === "market").map(m => marketStats(m, d));
+  const x = list.find(y => y.m.id === id); if (x) marketDetailSheet(x, list);
+}
+/* group sale lines into sales (one cart = one sale) */
+function groupSales(rows) {
+  const carts = {};
+  for (const r of rows) { const k = r.cart_id || r.client_id || String(r.id); (carts[k] = carts[k] || { k, rows: [], at: r.sold_at, pay: r.payment_method, total: 0 }).rows.push(r); carts[k].total += Number(r.amount); }
+  return carts;
+}
+const saleLabel = rows => rows.map(r => r.sku || r.description ? `${r.qty || 1}× ${nice(prod(r.sku)?.name || r.description || r.sku)}` : "Day total").join(", ");
+
+/* fix a sale that was entered wrongly: piece/size, how many, amount, payment — or take pieces out.
+   Stock follows automatically (stock = what came in minus what's sold). Removed lines are hidden, not erased. */
+function saleEditSheet(rows, opts) {
+  if (rows.some(r => /^Shop order/i.test(r.notes || ""))) return toast("This sale belongs to an online shop order. Change it from Online orders.");
+  /* a line that was sold below/above the list price (a discount) keeps its amount unless you change it */
+  const lines = rows.map(r => ({ r, sku: r.sku, qty: r.qty || 1, amount: Number(r.amount), description: r.description || "", gone: false,
+    typed: !!r.sku && Math.abs(Number(r.amount) - (r.qty || 1) * Number(r.unit_price ?? prod(r.sku)?.retail_price ?? 0)) > 0.004 }));
+  let pay = rows[0].payment_method || "Cash";
+  const kind = l => l.r.sku ? "piece" : l.r.description ? "other" : "total";
+  const price = l => Number(prod(l.sku)?.retail_price || l.r.unit_price || 0);
+  const at = new Date(rows[0].sold_at);
+  /* pieces to pick from: active ones by category, plus the one already on the sale if it's no longer active */
+  const options = cur => {
+    const list = activeProducts().slice(); if (cur && !list.some(p => p.sku === cur) && prod(cur)) list.push(prod(cur));
+    const cats = [...new Set(list.map(p => p.category || "Other"))].sort((a, b) => ((CAT_ORDER.indexOf(a) + 1) || 99) - ((CAT_ORDER.indexOf(b) + 1) || 99) || a.localeCompare(b));
+    return cats.map(c => `<optgroup label="${esc(CAT_PLURAL[c] || c)}">${list.filter(p => (p.category || "Other") === c).sort((a, b) => a.name.localeCompare(b.name) || sizeRank(a.sku) - sizeRank(b.sku))
+      .map(p => `<option value="${esc(p.sku)}" ${p.sku === cur ? "selected" : ""}>${esc(nice(p.name))}${sizeShort(p.size) && !/[-–]\s*(xxs|xs|s|m|l|xl|xxl)\s*$/i.test(p.name) ? " (" + sizeShort(p.size) + ")" : ""}</option>`).join("")}</optgroup>`).join("");
+  };
+  const draw = () => {
+    const live1 = lines.filter(l => !l.gone), total = live1.reduce((t, l) => t + (Number(l.amount) || 0), 0);
+    openSheet(`
+      <h2>Edit sale</h2>
+      <p class="small muted" style="margin-top:-6px">${esc(opts.where || "")} · ${at.toLocaleDateString("en-MY", { weekday: "short", day: "numeric", month: "short" })}, ${at.toLocaleTimeString("en-MY", { hour: "numeric", minute: "2-digit" })}</p>
+      ${lines.map((l, i) => l.gone ? "" : `<div class="card es-line">
+        ${kind(l) === "piece" ? `<label class="field"><span>Piece</span><select data-i="${i}" data-k="sku">${options(l.sku)}</select></label>`
+          : kind(l) === "other" ? `<label class="field"><span>Other piece</span><input data-i="${i}" data-k="description" value="${esc(l.description)}"></label>` : `<p class="small muted" style="margin:0 0 8px">Day total (no pieces recorded)</p>`}
+        <div class="two">
+          ${kind(l) === "total" ? "" : `<label class="field"><span>How many</span><input data-i="${i}" data-k="qty" type="number" min="1" step="1" inputmode="numeric" value="${l.qty}"></label>`}
+          <label class="field"><span>Amount (RM)</span><input data-i="${i}" data-k="amount" type="number" min="0" step="0.01" inputmode="decimal" value="${(Number(l.amount) || 0).toFixed(2)}"></label>
+        </div>
+        ${kind(l) === "piece" ? `<p class="small muted es-hint">${RM(price(l))} each${l.typed ? "" : " · amount follows the price"}</p>` : ""}
+        ${live1.length > 1 ? `<button type="button" class="link es-rm" data-rm="${i}">Take this piece out of the sale</button>` : ""}
+      </div>`).join("")}
+      <label class="field"><span>Paid by</span></label>
+      <div class="chips" style="margin-top:-6px">${PAYMENTS.map(p => `<button type="button" class="chip" data-pay="${p}" aria-pressed="${pay === p}">${p}</button>`).join("")}</div>
+      <div class="row" style="margin:12px 0"><span>Total</span><strong class="num" id="esTotal" style="font-size:22px">${RM(total)}</strong></div>
+      <button class="btn primary block" id="save">Save changes</button>
+      <button class="btn danger block" id="delAll" style="margin-top:10px">Remove the whole sale</button>`, root => {
+      const setTotal = () => { root.querySelector("#esTotal").textContent = RM(lines.filter(l => !l.gone).reduce((t, l) => t + (Number(l.amount) || 0), 0)); };
+      root.querySelectorAll("[data-k]").forEach(el => {
+        const l = lines[el.dataset.i], k = el.dataset.k;
+        el.addEventListener(k === "sku" ? "change" : "input", () => {
+          if (k === "sku") {
+            l.sku = el.value; if (!l.typed) { l.amount = round2(l.qty * price(l)); root.querySelector(`[data-i="${el.dataset.i}"][data-k="amount"]`).value = l.amount.toFixed(2); }
+            const h = el.closest(".es-line").querySelector(".es-hint"); if (h) h.textContent = `${RM(price(l))} each${l.typed ? "" : " · amount follows the price"}`;
+          }
+          if (k === "qty") { l.qty = Math.max(1, parseInt(el.value, 10) || 1); if (kind(l) === "piece" && !l.typed) { l.amount = round2(l.qty * price(l)); root.querySelector(`[data-i="${el.dataset.i}"][data-k="amount"]`).value = l.amount.toFixed(2); } }
+          if (k === "amount") { l.amount = el.value; l.typed = true; const h = el.closest(".es-line").querySelector(".es-hint"); if (h) h.textContent = `${RM(price(l))} each`; }
+          if (k === "description") l.description = el.value;
+          setTotal();
+        });
+      });
+      root.querySelectorAll("[data-rm]").forEach(b => b.onclick = () => { lines[b.dataset.rm].gone = true; draw(); });
+      root.querySelectorAll("[data-pay]").forEach(b => b.onclick = () => { pay = b.dataset.pay; root.querySelectorAll("[data-pay]").forEach(c => c.setAttribute("aria-pressed", c === b)); });
+      root.querySelector("#save").onclick = () => save(false);
+      root.querySelector("#delAll").onclick = () => { if (confirm("Remove this whole sale? The pieces go back into stock.")) save(true); };
+    });
+  };
+  async function save(all) {
+    const keep = all ? [] : lines.filter(l => !l.gone), drop = all ? lines : lines.filter(l => l.gone);
+    for (const l of keep) {
+      const a = Number(l.amount);
+      if (!(a >= 0) || String(l.amount).trim() === "") return toast("Check the amounts");
+      if (kind(l) === "other" && !l.description.trim()) return toast("Give the other piece a name");
+    }
+    /* keep the "final price" note right when amounts change; other notes stay as they were */
+    const gross = round2(keep.filter(l => kind(l) === "piece").reduce((t, l) => t + l.qty * price(l), 0)), total = round2(keep.reduce((t, l) => t + Number(l.amount), 0));
+    const diff = round2(gross - total), onlyPieces = keep.every(l => kind(l) === "piece");
+    const note = (old) => old && !/^Final price/.test(old) ? old : !onlyPieces ? (old || null) : diff > 0.004 ? `Final price ${RM(total)} (RM${diff.toFixed(2)} off)` : diff < -0.004 ? `Final price ${RM(total)}` : null;
+    const patch = l => ({ payment_method: pay, amount: round2(Number(l.amount)), notes: note(l.r.notes),
+      ...(kind(l) === "piece" ? { sku: l.sku, qty: l.qty, unit_price: price(l) } : kind(l) === "other" ? { description: l.description.trim(), qty: l.qty } : {}) });
+    const now = new Date().toISOString();
+    try {
+      /* lines still waiting on this phone are fixed in the phone's outbox; sent ones in the database */
+      let box = outbox();
+      for (const l of drop) { if (l.r.id) await q(sb.from("sales").update({ deleted_at: now }).eq("id", l.r.id)); box = box.filter(r => r.client_id !== l.r.client_id); }
+      for (const l of keep) { const p = patch(l); if (l.r.id) await q(sb.from("sales").update(p).eq("id", l.r.id)); box = box.map(r => r.client_id === l.r.client_id ? { ...r, ...p } : r); }
+      setOutbox(box);
+    } catch (e) { return fail(e); }
+    await loadStock(); state.todayJson = null;
+    toast(all ? "Sale removed. The pieces are back in stock." : "Sale updated");
+    opts.done ? opts.done() : closeSheet();
+  }
+  draw();
 }
 
 function newMarketSheet() {
