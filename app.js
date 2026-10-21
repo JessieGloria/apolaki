@@ -270,6 +270,7 @@ async function start(session) {
   $("#tabs").hidden = false; $("#top").hidden = false;
   try { const { data: me } = await sb.from("allowed_users").select("display_name").eq("email", state.user.email).maybeSingle(); state.name = me && me.display_name ? me.display_name.split(" ")[0] : null; } catch {}
   await loadAll(); updateBadge(); sync(); render();
+  if (new URLSearchParams(location.search).get("open") === "orders") { history.replaceState(null, "", location.pathname); shopOrdersSheet(); }
 }
 sb.auth.onAuthStateChange((evt, session) => {
   if (evt === "SIGNED_IN" && !state.user) start(session);
@@ -2350,6 +2351,62 @@ const waNum = ph => String(ph || "").replace(/\D/g, "").replace(/^0/, "60");
 let shopTab = "todo";
 let shopCache = [], shopSkipRefresh = false, shopLive = null;
 const fetchShopOrders = () => q(live("shop_orders", "*").order("created_at", { ascending: false }).limit(200));
+/* ---------- phone notifications for new shop orders (Accounts → Notifications) ---------- */
+const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const b64Bytes = s => Uint8Array.from(atob((s + "===".slice((s.length + 3) % 4)).replace(/-/g, "+").replace(/_/g, "/")), c => c.charCodeAt(0));
+async function pushSub() { return (await navigator.serviceWorker.ready).pushManager.getSubscription(); }
+async function pushCard() {
+  const el = $("#pushCard"); if (!el) return;
+  if (!pushSupported()) {
+    el.innerHTML = `<div class="small muted">${/iPhone|iPad|iPod/.test(navigator.userAgent) ? "On iPhone, tap Share → Add to Home Screen, then open Apolaki from the Home Screen icon to turn on notifications." : "This browser can't show notifications."}</div>`;
+    return;
+  }
+  const sub = await pushSub().catch(() => null);
+  if (!$("#pushCard")) return;
+  if (sub && Notification.permission === "granted") {
+    el.innerHTML = `<div class="small muted" style="margin-bottom:10px">On for this phone. You'll get an alert for every new shop order.</div><div class="btns" style="margin:0"><button class="btn" id="pushTest" type="button" style="flex:1">Send a test</button><button class="btn danger" id="pushOff" type="button" style="flex:1">Turn off</button></div>`;
+    $("#pushTest").onclick = pushTest; $("#pushOff").onclick = pushOff;
+  } else if (Notification.permission === "denied") {
+    el.innerHTML = `<div class="small muted">Notifications are blocked for Apolaki. Allow them in your phone's settings, then come back here.</div>`;
+  } else {
+    el.innerHTML = `<div class="small muted" style="margin-bottom:10px">Get an alert on this phone when someone orders from the shop.</div><button class="btn primary block" id="pushOn" type="button">Turn on notifications</button>`;
+    $("#pushOn").onclick = pushOn;
+  }
+}
+async function pushOn(e) {
+  e.currentTarget.disabled = true;
+  try {
+    if (await Notification.requestPermission() !== "granted") return pushCard();
+    const { data, error } = await sb.functions.invoke("notify-new-order", { body: { action: "key" } });
+    if (error) throw error;
+    const sub = await (await navigator.serviceWorker.ready).pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64Bytes(data.key) });
+    const j = sub.toJSON();
+    await q(sb.from("push_subscriptions").upsert({ endpoint: j.endpoint, p256dh: j.keys.p256dh, auth: j.keys.auth, email: state.user.email.toLowerCase(), device: navigator.userAgent.slice(0, 200) }));
+    toast("Notifications are on");
+  } catch (err) { fail(err); }
+  pushCard();
+}
+async function pushOff(e) {
+  e.currentTarget.disabled = true;
+  try {
+    const sub = await pushSub();
+    if (sub) { await q(sb.from("push_subscriptions").delete().eq("endpoint", sub.endpoint)); await sub.unsubscribe(); }
+    toast("Notifications are off for this phone");
+  } catch (err) { fail(err); }
+  pushCard();
+}
+async function pushTest(e) {
+  const b = e.currentTarget; b.disabled = true;
+  try {
+    const { data, error } = await sb.functions.invoke("notify-new-order", { body: { action: "test" } });
+    if (error) throw error;
+    toast(data.sent ? "Test sent. It should arrive in a few seconds." : "Couldn't reach this phone. Turn notifications off and on again.");
+  } catch (err) { fail(err); }
+  b.disabled = false;
+}
+/* tapping a notification opens the shop orders */
+if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", e => { if (e.data && e.data.open === "orders" && state.user) shopOrdersSheet(); });
+
 async function shopOrdersSheet() {
   try { shopCache = await fetchShopOrders(); } catch (e) { return fail(e); }
   watchShop();
@@ -2610,6 +2667,8 @@ function drawAccounts(sales, pays, exps) {
         return `<tr><th colspan="2" style="padding-top:14px">${esc(g)}</th></tr>${cats.sort((a, b) => b[1] - a[1]).map(([k, v]) => `<tr><td>${esc(k.split("|")[1])}</td><td class="r">${RM(v)}</td></tr>`).join("")}<tr><td class="muted">Total ${esc(g.toLowerCase())}</td><td class="r muted">${RM(sum)}</td></tr>`;
       }).join("")}
       <tr><td><strong>Net income</strong></td><td class="r"><strong style="${yearIn - yearOut < 0 ? "color:var(--rust)" : ""}">${RM(yearIn - yearOut)}</strong></td></tr></table></div>`;
+  view.insertAdjacentHTML("beforeend", `<h2>Notifications</h2><div class="card" id="pushCard"><div class="small muted">Checking this phone…</div></div>`);
+  pushCard();
   view.insertAdjacentHTML("beforeend", `<h2>Account</h2><div class="card"><div class="small muted" style="margin-bottom:10px">Signed in as ${esc(state.user?.email || "")}</div><button class="btn danger block" id="signOut">Sign out</button></div>`);
   $("#signOut").onclick = () => sb.auth.signOut();
   $("#mon").onchange = e => { state.accMonth = e.target.value; render(); };
