@@ -270,7 +270,8 @@ async function start(session) {
   $("#tabs").hidden = false; $("#top").hidden = false;
   try { const { data: me } = await sb.from("allowed_users").select("display_name").eq("email", state.user.email).maybeSingle(); state.name = me && me.display_name ? me.display_name.split(" ")[0] : null; } catch {}
   await loadAll(); updateBadge(); sync(); render();
-  if (new URLSearchParams(location.search).get("open") === "orders") { history.replaceState(null, "", location.pathname); shopOrdersSheet(); }
+  const opened = new URLSearchParams(location.search).get("open");
+  if (opened) { history.replaceState(null, "", location.pathname); openFromNotification(opened); }
 }
 sb.auth.onAuthStateChange((evt, session) => {
   if (evt === "SIGNED_IN" && !state.user) start(session);
@@ -2350,6 +2351,8 @@ const SHOP_REGION = { semenanjung: "Peninsular Malaysia", sarawak: "Sarawak", sa
 const waNum = ph => String(ph || "").replace(/\D/g, "").replace(/^0/, "60");
 let shopTab = "todo";
 let shopCache = [], shopSkipRefresh = false, shopLive = null;
+let chatOpen = null;   /* { id, draw } for the order page on screen, so live updates can refresh its messages */
+const SHOP_URL = "https://apolakibyjason.vercel.app";
 const fetchShopOrders = () => q(live("shop_orders", "*").order("created_at", { ascending: false }).limit(200));
 /* ---------- phone notifications for new shop orders (Accounts → Notifications) ---------- */
 const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
@@ -2404,8 +2407,14 @@ async function pushTest(e) {
   } catch (err) { fail(err); }
   b.disabled = false;
 }
-/* tapping a notification opens the shop orders */
-if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", e => { if (e.data && e.data.open === "orders" && state.user) shopOrdersSheet(); });
+/* tapping a notification opens the shop orders, or the order a message is about */
+function openFromNotification(open) {
+  if (!state.user || !open) return;
+  const m = /^order:(\d+)$/.exec(open);
+  if (m) shopOrdersSheet().then(() => openShopOrder(Number(m[1])));
+  else if (open === "orders") shopOrdersSheet();
+}
+if ("serviceWorker" in navigator) navigator.serviceWorker.addEventListener("message", e => { if (e.data) openFromNotification(e.data.open); });
 
 async function shopOrdersSheet() {
   try { shopCache = await fetchShopOrders(); } catch (e) { return fail(e); }
@@ -2424,7 +2433,12 @@ async function refreshShopList() {
 /* live updates: new orders and status changes show up without leaving the page */
 function watchShop() {
   if (shopLive || !sb.channel) return;
-  shopLive = sb.channel("shop-orders").on("postgres_changes", { event: "*", schema: "public", table: "shop_orders" }, () => {
+  shopLive = sb.channel("shop-orders").on("postgres_changes", { event: "*", schema: "public", table: "shop_orders" }, payload => {
+    const row = payload && payload.new;
+    if (row && chatOpen && row.id === chatOpen.id && $("#chat")) {
+      chatOpen.draw();
+      if (row.customer_waiting) sb.from("shop_orders").update({ customer_waiting: false }).eq("id", row.id).then(() => {});   /* being read right now */
+    }
     clearTimeout(watchShop.t);
     watchShop.t = setTimeout(() => { refreshShopList(); localSet("homeData", null); if (state.tab === "home" && $("#sheet").hidden) renderHome(); }, 400);
   }).subscribe();
@@ -2441,7 +2455,7 @@ function shopListPage() {
     const draw = () => {
       const f = tabs.find(t => t[0] === shopTab)[2], list = orders.filter(f);
       root.querySelector("#ordList").innerHTML = list.length ? list.map(o => `<div class="row" data-o="${o.id}"><div class="grow"><div class="title">${esc(o.order_no)} · ${esc(o.customer_name)}</div>
-        <div class="small muted">${ago(o.created_at)} · ${esc(SHOP_REGION[o.region] || o.region)}</div><span class="tag" style="margin-top:4px">${esc(SHOP_STATUS[o.status] || o.status)}</span></div>
+        <div class="small muted">${ago(o.created_at)} · ${esc(SHOP_REGION[o.region] || o.region)}</div><span class="tag" style="margin-top:4px">${esc(SHOP_STATUS[o.status] || o.status)}</span>${o.customer_waiting ? ` <span class="tag brass" style="margin-top:4px">New message</span>` : ""}</div>
         <span class="num">${o.total != null ? RM(o.total) : ""}</span>${CHEV}</div>`).join("") : `<div class="small muted" style="padding:12px 2px">No orders here.</div>`;
       root.querySelectorAll("[data-o]").forEach(r => r.onclick = () => openShopOrder(Number(r.dataset.o)));
     };
@@ -2454,12 +2468,32 @@ function shopListPage() {
 }
 /* always read the order fresh from the database, so it shows the latest status */
 async function openShopOrder(id) {
+  watchShop();
   try {
     const [rows, items] = await Promise.all([q(live("shop_orders", "*").eq("id", id)), q(sb.from("shop_order_items").select("*").eq("order_id", id).order("id"))]);
     if (!rows.length) return toast("Order not found");
     const i = shopCache.findIndex(x => x.id === id); if (i >= 0) shopCache[i] = rows[0];
     shopOrderPage(rows[0], items);
   } catch (e) { fail(e); }
+}
+/* messages and payment receipts for one order; customers write from their order page on the shop */
+async function loadChat(orderId) {
+  const msgs = await q(sb.from("shop_messages").select("*").eq("order_id", orderId).order("id"));
+  const paths = msgs.filter(m => m.attachment_path).map(m => m.attachment_path);
+  if (paths.length) {
+    const { data } = await sb.storage.from("shop-receipts").createSignedUrls(paths, 3600);
+    (data || []).forEach(d => { const m = msgs.find(x => x.attachment_path === d.path); if (m && d.signedUrl) m.url = d.signedUrl; });
+  }
+  return msgs;
+}
+function chatHtml(msgs) {
+  if (!msgs.length) return `<div class="small muted">No messages yet. The customer can message you and upload a receipt from their order page on the shop.</div>`;
+  return msgs.map(m => `<div class="bubble${m.sender === "team" ? " me" : ""}">
+    ${m.kind !== "receipt" ? `<div class="txt">${esc(m.body)}</div>`
+      : !m.url ? `<div class="txt">Payment receipt</div>`
+      : /\.pdf$/i.test(m.attachment_path) ? `<a href="${esc(m.url)}" target="_blank" rel="noopener">Payment receipt (PDF) · Open</a>`
+      : `<a href="${esc(m.url)}" target="_blank" rel="noopener"><img class="rcpt" src="${esc(m.url)}" alt="Payment receipt"></a><div class="txt">Payment receipt · tap to enlarge</div>`}
+    <div class="small muted">${m.sender === "team" ? esc(m.sender_name || "Apolaki") + " · " : ""}${ago(m.created_at)}</div></div>`).join("");
 }
 async function shopOrderPage(o, items) {
   if (!items) try { items = await q(sb.from("shop_order_items").select("*").eq("order_id", o.id).order("id")); } catch (e) { return fail(e); }
@@ -2481,6 +2515,10 @@ async function shopOrderPage(o, items) {
       ${o.customer_note ? `<p class="small" style="margin:8px 0 0"><b>Note:</b> ${esc(o.customer_note)}</p>` : ""}
       <a class="btn block" style="margin-top:12px" href="https://wa.me/${waNum(o.phone)}?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">WhatsApp ${esc(o.customer_name.split(" ")[0])}</a>
     </div>
+    <h3 style="margin-top:16px">Messages</h3>
+    <div class="card"><div class="chat" id="chat"><div class="small muted">Loading…</div></div>
+      <div class="composer"><textarea id="reply" rows="2" maxlength="1000" placeholder="Reply to ${esc(o.customer_name.split(" ")[0])}…"></textarea><button class="btn primary" id="sendReply" type="button">Send</button></div>
+      <div class="small muted" style="margin-top:8px">${esc(o.customer_name.split(" ")[0])} sees your reply on their order page. <button type="button" class="linkish" id="copyPage">Copy their order page link</button></div></div>
     <div class="list tight" style="margin-top:12px">${items.map(i => `<div class="row"><div class="grow"><div class="title" style="white-space:normal">${i.qty}× ${esc(nice(i.name))}</div>
       <div class="small muted">${i.size && !/^(free|assorted)$/i.test(i.size) ? esc(i.size) + " · " : ""}Qty ${i.qty}</div></div><span class="num">${RM(i.qty * i.unit_price)}</span></div>`).join("")}
       <div class="row"><div class="grow"><div class="title">Shipping</div></div><span class="num">${o.shipping_fee == null ? "Not set" : RM(o.shipping_fee)}</span></div>
@@ -2521,6 +2559,25 @@ async function shopOrderPage(o, items) {
         localSet("homeData", null);
         (["paid", "shipped", "cancel"].includes(action) ? loadStock() : Promise.resolve()).then(() => { if (state.tab === "home") renderHome(); }).catch(() => {});
       } catch (e) { btns.forEach(b => b.disabled = false); if (clicked && label) clicked.textContent = label; fail(e); }
+    };
+    const drawChat = async () => { try { const msgs = await loadChat(o.id); const el = root.querySelector("#chat"); if (el) el.innerHTML = chatHtml(msgs); } catch {} };
+    chatOpen = { id: o.id, draw: drawChat };
+    drawChat();
+    if (o.customer_waiting) sb.from("shop_orders").update({ customer_waiting: false }).eq("id", o.id).then(() => { const i = shopCache.findIndex(x => x.id === o.id); if (i >= 0) shopCache[i].customer_waiting = false; });
+    root.querySelector("#sendReply").onclick = async e => {
+      const b = e.currentTarget, ta = root.querySelector("#reply"), text = ta.value.trim();
+      if (!text) return;
+      b.disabled = true; b.textContent = "Sending…";
+      try {
+        await q(sb.from("shop_messages").insert({ order_id: o.id, sender: "team", body: text, sender_name: state.name || null }));
+        await q(sb.from("shop_orders").update({ customer_waiting: false, last_message_at: new Date().toISOString() }).eq("id", o.id));
+        ta.value = ""; await drawChat();
+      } catch (err) { fail(err); }
+      b.disabled = false; b.textContent = "Send";
+    };
+    root.querySelector("#copyPage").onclick = async () => {
+      const url = `${SHOP_URL}/#/o/${o.access_token}`;
+      try { await navigator.clipboard.writeText(url); toast("Link copied. Paste it to the customer."); } catch { prompt("Order page link", url); }
     };
     let pay = PAY[0];
     root.querySelectorAll("[data-pay]").forEach(b => b.onclick = () => { pay = b.dataset.pay; root.querySelectorAll("[data-pay]").forEach(x => x.setAttribute("aria-pressed", x === b)); });

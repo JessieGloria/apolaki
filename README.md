@@ -27,3 +27,10 @@ On iPhone the app must be added to the Home Screen first (Share → Add to Home 
 How it works: a trigger on `shop_orders` calls the `notify-new-order` Supabase function
 (source in `supabase/functions/`), which sends to every phone in `push_subscriptions`.
 Its keys live in `push_config` (no one but the function can read it).
+
+## Customer messages and receipts
+Every shop order has a private page on the shop (`/#/o/<code>`) where the customer sees the status and tracking,
+uploads a payment receipt and messages you. In the app, open the order: the conversation and receipts are under
+**Messages**, and orders waiting for a reply show **New message**. "Copy their order page link" lets you send
+older customers their page. Receipts are stored privately (`shop-receipts` bucket); only approved users can open them.
+Customer messages and receipts also send a phone notification.

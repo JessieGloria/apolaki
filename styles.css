@@ -517,3 +517,16 @@ table.xt { border-collapse: separate; border-spacing: 0; font-size: 12.5px; min-
 .sale-day span { color: var(--muted); font-size: 12px; }
 .row.tap { cursor: pointer; }
 .row.tap .chev { margin-left: 6px; color: var(--muted); }
+
+/* shop order messages */
+.chat { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.bubble { max-width: 85%; align-self: flex-start; background: var(--input-bg); border-radius: 16px 16px 16px 4px; padding: 9px 12px; }
+.bubble.me { align-self: flex-end; background: var(--accent-bg); border-radius: 16px 16px 4px 16px; }
+.bubble .txt { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
+.bubble .rcpt { width: 180px; max-width: 100%; border-radius: 10px; margin-bottom: 6px; }
+.bubble a { color: var(--accent-ink); font-weight: 600; }
+.composer { display: flex; gap: 8px; align-items: flex-end; }
+.composer textarea { flex: 1; min-width: 0; }
+.composer .btn.primary { padding: 12px 18px; }
+.linkish { border: 0; background: none; padding: 0; color: var(--accent-ink); font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
+.composer textarea { background: var(--input-bg); box-shadow: none; }
