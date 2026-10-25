@@ -124,9 +124,16 @@ function feeStatus(m) {
   if (!total) return { key: "nofee", paid, total, left, confirmed: true, label: paid > 0 ? `Booth fee ${RM(paid)} paid` : "No booth fee set", color: "" };
   if (paid <= 0.004) return { key: "unpaid", paid, total, left, confirmed: false, label: `Not paid yet · booth fee ${RM(total)}${m.fee_due_on ? `, due ${shortDate(m.fee_due_on)}` : ""}`, color: "peach" };
   if (left > 0.004) return { key: "deposit", paid, total, left, confirmed: true, label: `Confirmed · deposit ${RM(paid)} paid, ${RM(left)} left${m.fee_due_on ? ` (due ${shortDate(m.fee_due_on)})` : ""}`, color: "green" };
-  return { key: "paid", paid, total, left: 0, confirmed: true, label: "Confirmed · booth fee fully paid", color: "green" };
+  const dep = Number(m.refundable) || 0;
+  return { key: "paid", paid, total, left: 0, confirmed: true, label: `Confirmed · booth fee fully paid${dep ? ` (incl. ${RM(dep)} deposit that comes back)` : ""}`, color: "green" };
 }
 const feeDesc = (m, kind) => `${m.name}${kind ? ` – ${kind}` : ""}`;
+/* part of the booth fee that's a refundable deposit, returned after the market */
+function depState(m) {
+  const amt = Number(m.refundable) || 0, settled = m.deposit_back_on != null, back = Number(m.deposit_back) || 0;
+  const over = !m.cancelled_on && (!m.active || (m.end_date || m.start_date || "9999") < ymd(new Date()));
+  return { amt, settled, back, waiting: amt > 0 && !settled && over, lost: settled ? round2(Math.max(0, amt - back)) : 0 };
+}
 const openMarkets = () => state.locations.filter(l => l.type === "market" && l.active && !isUpcoming(l));
 const upcomingMarkets = () => state.locations.filter(isUpcoming).sort((a, b) => a.start_date.localeCompare(b.start_date));
 const marketDates = m => !m.start_date ? "Dates not set" : !m.end_date || m.end_date === m.start_date ? shortDate(m.start_date) : `${shortDate(m.start_date)} – ${shortDate(m.end_date)}`;
@@ -508,6 +515,7 @@ function drawHome(d, quiet) {
     if (f.key === "deposit" && m.fee_due_on && m.fee_due_on <= soon) attn.push({ c: m.fee_due_on < today ? "var(--coral)" : "var(--peach)", t: `${m.name}: ${RM(f.left)} booth fee balance ${m.fee_due_on < today ? "is overdue" : "due soon"}`, s: `Due ${shortDate(m.fee_due_on)}`, go: "market" });
     else if (f.key === "unpaid" && ((m.fee_due_on && m.fee_due_on <= soon) || (m.start_date && m.start_date <= twoWk))) attn.push({ c: "var(--peach)", t: `${m.name} isn't paid yet`, s: `Booth fee ${RM(f.total)}${m.fee_due_on ? ` · due ${shortDate(m.fee_due_on)}` : ` · market on ${shortDate(m.start_date)}`}`, go: "market" });
   });
+  state.locations.filter(m => m.type === "market" && depState(m).waiting).forEach(m => attn.push({ c: "var(--peach)", t: `Get the ${RM(depState(m).amt)} booth deposit back from ${m.name}`, s: "Tap when it's returned", dep: m.id }));
   activeMarkets.filter(m => m.end_date && m.end_date < ymd(now)).forEach(m => attn.push({ c: "var(--peach)", t: `${m.name} ended ${shortDate(m.end_date)}`, s: "End the market to bring stock back", go: "market", sell: m.id }));
   if (out.length) attn.push({ c: "var(--coral)", t: `${out.length} size${out.length > 1 ? "s" : ""} sold out everywhere`, s: [...new Set(lowD.filter(g => g.out.length).map(g => g.name))].slice(0, 3).join(", "), go: "low" });
   if (outbox().length) attn.push({ c: "var(--mauve)", t: `${outbox().length} sale line${outbox().length > 1 ? "s" : ""} waiting to sync`, s: "Will send when you're online", go: "market" });
@@ -547,7 +555,7 @@ function drawHome(d, quiet) {
   view.querySelectorAll("[data-p]").forEach(b => b.onclick = () => { state.homePeriod = b.dataset.p; drawHome(d, true); });
   watchShop();
   view.querySelectorAll("[data-go]").forEach(r => r.onclick = () => r.dataset.go === "shop" ? shopOrdersSheet() : r.dataset.go === "low" ? lowStockSheet() : go(r.dataset.go));
-  view.querySelectorAll("[data-ai]").forEach(r => r.onclick = () => { const a = attn[Number(r.dataset.ai)]; if (a.go === "shop") return shopOrdersSheet(); if (a.go === "low") return lowStockSheet(); if (a.sell) { state.sellAt = a.sell; localSet("sellAt", a.sell); } go(a.go); });
+  view.querySelectorAll("[data-ai]").forEach(r => r.onclick = () => { const a = attn[Number(r.dataset.ai)]; if (a.go === "shop") return shopOrdersSheet(); if (a.go === "low") return lowStockSheet(); if (a.dep) return depositBackSheet(loc(a.dep)); if (a.sell) { state.sellAt = a.sell; localSet("sellAt", a.sell); } go(a.go); });
   view.querySelectorAll("[data-place]").forEach(t => t.onclick = () => { state.stockLoc = Number(t.dataset.place); go("stock"); });
 }
 
@@ -924,12 +932,15 @@ function marketStats(m, d) {
   const nm = m.name.toLowerCase();
   const linked = d.fees.filter(f => f.location_id === m.id);
   const feeRows = linked.length ? linked : d.fees.filter(f => { if (f.location_id) return false; const t = `${f.description || ""} ${f.paid_to || ""}`.toLowerCase(); return t.includes(nm) || nm.split(/\s+/).filter(w => w.length > 2 && !/market/.test(w)).some(w => t.includes(w)); });
-  const fee = m.cancelled_on ? feeRows.reduce((t, f) => t + Number(f.amount), 0) : m.fee != null ? Number(m.fee) : feeRows.reduce((t, f) => t + Number(f.amount), 0);
+  const dep = depState(m);
+  const fee = m.cancelled_on ? feeRows.reduce((t, f) => t + Number(f.amount), 0)
+    : m.fee != null ? Number(m.fee) - (dep.settled ? dep.back : dep.amt)   /* the refundable deposit isn't a cost (unless it wasn't returned) */
+    : feeRows.reduce((t, f) => t + Number(f.amount), 0);
   const feeKnown = m.fee != null || feeRows.length > 0;
   const pay = {}; sl.forEach(s => { if (s.payment_method) pay[s.payment_method] = (pay[s.payment_method] || 0) + Number(s.amount); });
   const sortDate = dayList[0] || feeRows.map(f => f.spent_on).sort()[0] || "0000";
   return { m, sl, total, pieces, itemised: itemised.length > 0, imported: sl.length > 0 && !itemised.length, days, dayList, nDays: Math.max(1, dayList.length), fee, feeKnown,
-    net: total - fee, perDay: total / Math.max(1, dayList.length), pay, sortDate, running: !!m.active && !isUpcoming(m), cancelled: !!m.cancelled_on };
+    net: total - fee, perDay: total / Math.max(1, dayList.length), pay, sortDate, running: !!m.active && !isUpcoming(m), cancelled: !!m.cancelled_on, dep };
 }
 async function marketsSheet() {
   let d;
@@ -950,7 +961,7 @@ async function marketsSheet() {
     <div class="list">${list.map(x => `<div class="row" data-mk="${x.m.id}"><div class="grow">
       <div class="title" style="white-space:normal">${esc(x.m.name)}${x.running ? ` ${tag("Running", "green")}` : ""}${x.cancelled ? ` ${tag("Cancelled", "rust")}` : ""}</div>
       <div class="small muted">${esc(dates(x))}${x.m.venue ? ` · ${esc(x.m.venue)}` : ""}</div>
-      <div class="small muted">${x.cancelled ? (x.fee > 0.004 ? `<span style="color:var(--rust)">Cancelled · ${RM(x.fee)} not refunded</span>` : "Cancelled · fully refunded") : x.total ? `${RM(x.perDay)} a day` : x.feeKnown ? `<span style="color:var(--rust)">Fee paid, no sales recorded</span>` : "No sales recorded"}${x.feeKnown && !x.cancelled ? ` · fee ${RM(x.fee)} · after fee ${RM(x.net)}` : ""}</div></div>
+      <div class="small muted">${x.cancelled ? (x.fee > 0.004 ? `<span style="color:var(--rust)">Cancelled · ${RM(x.fee)} not refunded</span>` : "Cancelled · fully refunded") : x.total ? `${RM(x.perDay)} a day` : x.feeKnown ? `<span style="color:var(--rust)">Fee paid, no sales recorded</span>` : "No sales recorded"}${x.dep && x.dep.waiting ? ` · <span style="color:#c46a33">${RM(x.dep.amt)} deposit to get back</span>` : ""}${x.feeKnown && !x.cancelled ? ` · fee ${RM(x.fee)} · after fee ${RM(x.net)}` : ""}</div></div>
       <span class="num">${RM(x.total)}</span></div>`).join("") || `<div class="empty">No markets yet.</div>`}</div>`, root => {
     root.querySelectorAll("[data-mk]").forEach(r => r.onclick = () => marketDetailSheet(list.find(x => x.m.id === Number(r.dataset.mk)), list));
   });
@@ -978,6 +989,8 @@ function marketDetailSheet(x, all) {
       ${x.itemised ? `<div class="figure"><div class="label">Pieces sold</div><div class="value">${x.pieces}</div></div><div class="figure"><div class="label">Avg per piece</div><div class="value">${x.pieces ? RM(x.total / x.pieces) : "—"}</div></div>` : ""}
       ${rank ? `<div class="figure"><div class="label">Rank (per day)</div><div class="value">${rank} of ${ranked.length}</div></div>` : ""}
     </div>
+    ${x.dep && x.dep.amt && !x.cancelled ? `<div class="card" style="padding:12px 14px;margin:0 0 12px"><div class="small">${x.dep.settled ? (x.dep.lost ? `Booth deposit: got back ${RM(x.dep.back)} of ${RM(x.dep.amt)}. The rest counts as part of the fee.` : `Booth deposit of ${RM(x.dep.amt)} returned ${shortDate(m.deposit_back_on)}. Not counted in the fee.`) : `Booth fee includes a ${RM(x.dep.amt)} deposit that comes back. It isn't counted in the fee above.`}</div>
+      ${x.dep.waiting ? `<button class="btn small" id="depBack" style="margin-top:8px">Deposit returned</button>` : ""}</div>` : ""}
     ${avgOthers != null && x.total ? `<p class="small muted">${x.perDay >= avgOthers ? "Above" : "Below"} a typical market day (${RM(avgOthers)}, the middle of the other markets).</p>` : ""}
     ${!x.total ? `<div class="warn-banner">No sales recorded for this market${x.feeKnown ? `, but a ${RM(x.fee)} fee was paid` : ""}. If it went ahead, add its sales with “+ Add money in” on Accounts.</div>` : ""}
     ${x.imported ? `<p class="small muted">Only daily totals were recorded for this market, so there's no breakdown by piece.</p>` : ""}
@@ -993,6 +1006,7 @@ function marketDetailSheet(x, all) {
           <span class="num">${RM(c.total)}</span>${CHEV}</div>`).join("")}</div>`).join("")}` : ""}
   `, root => {
     root.querySelectorAll("[data-sale]").forEach(r => r.onclick = () => saleEditSheet(saleCarts[r.dataset.sale].rows, { where: m.name, done: () => refreshMarketDetail(m.id) }));
+    const db = root.querySelector("#depBack"); if (db) db.onclick = () => depositBackSheet(m, () => refreshMarketDetail(m.id));
   });
 }
 /* reload a market's numbers after a sale was fixed, and show its page again */
@@ -1110,9 +1124,10 @@ function newMarketSheet() {
     </form>`, root => { followEnd(root); bindFeeFields(root); root.querySelector("#f").onsubmit = async e => {
       e.preventDefault(); const f = new FormData(e.target), fee = Number(f.get("fee")) || null;
       if (f.get("end") && f.get("start") && f.get("end") < f.get("start")) return toast("The last day is before the first day");
+      if ((Number(f.get("refundable")) || 0) > (fee || 0)) return toast("The refundable part can't be more than the booth fee");
       const pay = readFeePay(root, fee, 0); if (pay === false) return;
       try {
-        const [m] = await q(sb.from("locations").insert({ name: f.get("name").trim(), type: "market", venue: f.get("venue") || null, start_date: f.get("start") || null, end_date: f.get("end") || null, fee, fee_due_on: f.get("due") || null, active: true }).select());
+        const [m] = await q(sb.from("locations").insert({ name: f.get("name").trim(), type: "market", venue: f.get("venue") || null, start_date: f.get("start") || null, end_date: f.get("end") || null, fee, refundable: Number(f.get("refundable")) || null, fee_due_on: f.get("due") || null, active: true }).select());
         if (pay) await q(sb.from("expenses").insert({ spent_on: pay.on, expense_group: "Operating Expenses", category: "Market Fee", amount: pay.amount, description: feeDesc(m, pay.kind), paid_to: f.get("venue") || m.name, location_id: m.id }));
         state.locations.push(m); localSet("locations", state.locations); await loadMktPays(true);
         if (isUpcoming(m)) { closeSheet(); toast(`${m.name} added to upcoming markets${pay ? "" : " · not paid yet"}`); render(); return; }
@@ -1125,7 +1140,9 @@ function newMarketSheet() {
 function feeFields(m) {
   const today = ymd(new Date());
   return `<div class="card" style="padding:14px;margin:4px 0 14px">
-      <label class="field"><span>Booth fee (RM)</span><input name="fee" type="number" step="0.01" min="0" inputmode="decimal" value="${m && m.fee != null ? m.fee : ""}"></label>
+      <div class="two"><label class="field"><span>Booth fee (RM)</span><input name="fee" type="number" step="0.01" min="0" inputmode="decimal" value="${m && m.fee != null ? m.fee : ""}"></label>
+      <label class="field"><span>Refundable part (RM)</span><input name="refundable" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0" value="${m && m.refundable ? m.refundable : ""}"></label></div>
+      <p class="small muted" style="margin:-6px 0 12px">Refundable part: a deposit inside the booth fee that you get back after the market. Leave empty if there isn't one.</p>
       ${m ? "" : `<label class="field"><span>Paid so far</span></label>
       <div class="chips" style="margin-top:-6px" id="paidHow"><button type="button" class="chip" data-ph="none" aria-pressed="true">Nothing yet</button><button type="button" class="chip" data-ph="deposit" aria-pressed="false">Deposit</button><button type="button" class="chip" data-ph="full" aria-pressed="false">Full fee</button></div>
       <div class="two" id="payRow" hidden><label class="field"><span id="payAmtL">Deposit (RM)</span><input name="payAmt" type="number" step="0.01" min="0" inputmode="decimal"></label>
@@ -1173,6 +1190,31 @@ function bindUpcoming(root) {
   root.querySelectorAll("[data-upbring]").forEach(b => b.onclick = () => bringStockSheet(loc(b.dataset.upbring)));
   root.querySelectorAll("[data-upedit]").forEach(b => b.onclick = () => editMarketSheet(loc(b.dataset.upedit)));
   root.querySelectorAll("[data-uppay]").forEach(b => b.onclick = () => payFeeSheet(loc(b.dataset.uppay)));
+}
+function depositBackSheet(m, done) {
+  const d = depState(m);
+  openSheet(`
+    <h2>Deposit back · ${esc(m.name)}</h2>
+    <p class="small muted" style="margin-top:-6px">${RM(d.amt)} of the booth fee was a refundable deposit.</p>
+    <form id="f">
+      <div class="two"><label class="field"><span>Amount returned (RM)</span><input name="amt" type="number" step="0.01" min="0" inputmode="decimal" value="${d.amt}" required></label>
+      <label class="field"><span>Returned on</span><input name="on" type="date" value="${ymd(new Date())}"></label></div>
+      <button class="btn primary block" type="submit">Save · deposit returned</button>
+    </form>
+    <button class="btn block" id="none" style="margin-top:10px">We didn't get it back</button>`, root => {
+    const finish = async (amt, on) => {
+      if (amt > 0) await q(sb.from("expenses").insert({ spent_on: on, expense_group: "Operating Expenses", category: "Market Fee", amount: -amt, description: feeDesc(m, "deposit returned"), paid_to: m.venue || m.name, location_id: m.id }));
+      await q(sb.from("locations").update({ deposit_back: amt, deposit_back_on: on }).eq("id", m.id));
+      m.deposit_back = amt; m.deposit_back_on = on; localSet("locations", state.locations);
+      await loadMktPays(true); closeSheet(); render(); if (done) done();
+    };
+    root.querySelector("#f").onsubmit = async e => {
+      e.preventDefault(); const fd = new FormData(e.target), amt = round2(Number(fd.get("amt")) || 0);
+      if (amt > d.amt + 0.004) return toast(`The deposit was ${RM(d.amt)}`);
+      try { await finish(amt, fd.get("on") || ymd(new Date())); toast(amt ? `${RM(amt)} deposit back saved` : "Saved"); } catch (err) { fail(err); }
+    };
+    root.querySelector("#none").onclick = async () => { try { await finish(0, ymd(new Date())); toast("Saved · the deposit counts as part of the fee"); } catch (err) { fail(err); } };
+  });
 }
 function feeTag(m) {
   const f = feeStatus(m), col = { green: "#3f9a83", peach: "#c46a33", rust: "#cc4b45" }[f.color] || "var(--muted)";
@@ -1258,7 +1300,8 @@ function editMarketSheet(m) {
       if (f.get("end") && f.get("end") < f.get("start")) return toast("The last day is before the first day");
       const fee = f.get("fee") === "" ? null : round2(Number(f.get("fee")) || 0), paid = feeStatus(m).paid;
       if (fee != null && fee < paid - 0.004) return toast(`${RM(paid)} is already paid. The fee can't be less than that.`);
-      const patch = { name: f.get("name").trim(), venue: f.get("venue") || null, start_date: f.get("start"), end_date: f.get("end") || f.get("start"), fee, fee_due_on: f.get("due") || null };
+      const patch = { name: f.get("name").trim(), venue: f.get("venue") || null, start_date: f.get("start"), end_date: f.get("end") || f.get("start"), fee, refundable: Number(f.get("refundable")) || null, fee_due_on: f.get("due") || null };
+      if ((patch.refundable || 0) > (fee || 0)) return toast("The refundable part can't be more than the booth fee");
       try {
         await q(sb.from("locations").update(patch).eq("id", m.id));
         if (patch.name !== m.name) for (const e of feePays(m)) if ((e.description || "").startsWith(m.name)) await q(sb.from("expenses").update({ description: patch.name + e.description.slice(m.name.length) }).eq("id", e.id));
