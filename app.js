@@ -113,6 +113,23 @@ const loc = id => state.locations.find(l => l.id === Number(id));
 const workshop = () => state.locations.find(l => l.type === "workshop");
 const retailers = () => state.locations.filter(l => l.type === "retailer");
 const activeProducts = () => state.products.filter(p => p.status === "Active");
+/* markets: "upcoming" until their first day, then open until ended */
+const isUpcoming = m => !!(m && m.type === "market" && m.active && !m.cancelled_on && m.start_date && m.start_date > ymd(new Date()));
+/* booth fee: what's agreed, what's paid (deposit + balance − refunds), and what that means */
+const feePays = m => (state.mktPays || []).filter(e => e.location_id === m.id).sort((a, b) => a.spent_on.localeCompare(b.spent_on));
+function feeStatus(m) {
+  const paid = round2(feePays(m).reduce((t, e) => t + Number(e.amount), 0)), total = m.fee != null ? Number(m.fee) : null;
+  const left = total != null ? round2(Math.max(0, total - paid)) : 0;
+  if (m.cancelled_on) return { key: "cancelled", paid, total, left: 0, confirmed: false, label: paid > 0.004 ? `Cancelled · ${RM(paid)} not refunded` : "Cancelled", color: "rust" };
+  if (!total) return { key: "nofee", paid, total, left, confirmed: true, label: paid > 0 ? `Booth fee ${RM(paid)} paid` : "No booth fee set", color: "" };
+  if (paid <= 0.004) return { key: "unpaid", paid, total, left, confirmed: false, label: `Not paid yet · booth fee ${RM(total)}${m.fee_due_on ? `, due ${shortDate(m.fee_due_on)}` : ""}`, color: "peach" };
+  if (left > 0.004) return { key: "deposit", paid, total, left, confirmed: true, label: `Confirmed · deposit ${RM(paid)} paid, ${RM(left)} left${m.fee_due_on ? ` (due ${shortDate(m.fee_due_on)})` : ""}`, color: "green" };
+  return { key: "paid", paid, total, left: 0, confirmed: true, label: "Confirmed · booth fee fully paid", color: "green" };
+}
+const feeDesc = (m, kind) => `${m.name}${kind ? ` – ${kind}` : ""}`;
+const openMarkets = () => state.locations.filter(l => l.type === "market" && l.active && !isUpcoming(l));
+const upcomingMarkets = () => state.locations.filter(isUpcoming).sort((a, b) => a.start_date.localeCompare(b.start_date));
+const marketDates = m => !m.start_date ? "Dates not set" : !m.end_date || m.end_date === m.start_date ? shortDate(m.start_date) : `${shortDate(m.start_date)} – ${shortDate(m.end_date)}`;
 /* retailer codes: each shop's own item code (Art Attic = APO numbers). Only shown on retailer pages. */
 const codeAt = (locId, sku) => state.codes.find(c => c.location_id === Number(locId) && c.sku === sku)?.code || null;
 /* a shop may use one code for all sizes of a design; then several items share that code (smallest size first) */
@@ -246,18 +263,25 @@ setInterval(sync, 20000);
 /* ---------- data ---------- */
 async function loadAll() {
   try {
-    const [p, l, c] = await Promise.all([
+    const [p, l, c, mp] = await Promise.all([
       q(live("products", "*").order("name")),
       q(live("locations", "*").order("id")),
-      q(sb.from("retailer_codes").select("*"))
+      q(sb.from("retailer_codes").select("*")),
+      loadMktPays(true)
     ]);
     state.products = p; state.locations = l; state.codes = c;
     localSet("products", p); localSet("locations", l); localSet("codes", c);
     await loadStock();
   } catch (e) {
-    state.products = localGet("products", []); state.locations = localGet("locations", []); state.stock = localGet("stock", []); state.codes = localGet("codes", []);
+    state.products = localGet("products", []); state.locations = localGet("locations", []); state.stock = localGet("stock", []); state.codes = localGet("codes", []); state.mktPays = localGet("mktPays", []);
     toast("Offline. Showing the last saved copy.");
   }
+}
+/* booth fee payments (deposit, balance, refunds) linked to each market */
+async function loadMktPays(quiet) {
+  try { state.mktPays = await q(live("expenses", "id,spent_on,amount,description,location_id").not("location_id", "is", null)); localSet("mktPays", state.mktPays); }
+  catch (e) { state.mktPays = localGet("mktPays", []); if (!quiet) throw e; }
+  return state.mktPays;
 }
 async function loadStock() {
   try { state.stock = await q(sb.from("stock_levels").select("*")); localSet("stock", state.stock); }
@@ -465,7 +489,7 @@ function drawHome(d, quiet) {
   const placeIcon = l => l.type === "workshop" ? "tool" : l.type === "retailer" ? "shop" : "tent";
   const lowD = lowStockData();
   const out = lowD.flatMap(g => g.out);
-  const activeMarkets = state.locations.filter(l => l.type === "market" && l.active);
+  const activeMarkets = openMarkets(), nextMarket = upcomingMarkets()[0];
 
   /* needs attention: things that want an action */
   const attn = [];
@@ -479,6 +503,11 @@ function drawHome(d, quiet) {
   });
   const prevM = ym(new Date(now.getFullYear(), now.getMonth() - 1, 1));
   retailers().forEach(r => { const has = (d.lastReports || []).some(p => p.location_id === r.id); if (!has && now.getDate() >= 5) attn.push({ c: "var(--peach)", t: `No ${monthStart(prevM).toLocaleDateString("en-MY", { month: "long" })} sales report from ${r.name} yet`, s: "Paste it in Retailers", go: "retailers" }); });
+  state.locations.filter(m => m.type === "market" && m.active && !m.cancelled_on && (m.end_date || m.start_date || "9999") >= ymd(now)).forEach(m => {
+    const f = feeStatus(m), today = ymd(now), soon = ymd(new Date(now.getTime() + 5 * 864e5)), twoWk = ymd(new Date(now.getTime() + 14 * 864e5));
+    if (f.key === "deposit" && m.fee_due_on && m.fee_due_on <= soon) attn.push({ c: m.fee_due_on < today ? "var(--coral)" : "var(--peach)", t: `${m.name}: ${RM(f.left)} booth fee balance ${m.fee_due_on < today ? "is overdue" : "due soon"}`, s: `Due ${shortDate(m.fee_due_on)}`, go: "market" });
+    else if (f.key === "unpaid" && ((m.fee_due_on && m.fee_due_on <= soon) || (m.start_date && m.start_date <= twoWk))) attn.push({ c: "var(--peach)", t: `${m.name} isn't paid yet`, s: `Booth fee ${RM(f.total)}${m.fee_due_on ? ` · due ${shortDate(m.fee_due_on)}` : ` · market on ${shortDate(m.start_date)}`}`, go: "market" });
+  });
   activeMarkets.filter(m => m.end_date && m.end_date < ymd(now)).forEach(m => attn.push({ c: "var(--peach)", t: `${m.name} ended ${shortDate(m.end_date)}`, s: "End the market to bring stock back", go: "market", sell: m.id }));
   if (out.length) attn.push({ c: "var(--coral)", t: `${out.length} size${out.length > 1 ? "s" : ""} sold out everywhere`, s: [...new Set(lowD.filter(g => g.out.length).map(g => g.name))].slice(0, 3).join(", "), go: "low" });
   if (outbox().length) attn.push({ c: "var(--mauve)", t: `${outbox().length} sale line${outbox().length > 1 ? "s" : ""} waiting to sync`, s: "Will send when you're online", go: "market" });
@@ -498,7 +527,7 @@ function drawHome(d, quiet) {
     </div><div class="mcol">
       ${pc("g-sunset", "Payouts due", RM(due), "retailers", d.unpaid.length ? d.unpaid.map(u => monthStart(u.period_month.slice(0, 7)).toLocaleDateString("en-MY", { month: "short" })).join(", ") : "All paid")}
       ${pc("g-coral tall", "Online orders", (d.shopOpen || []).length, "shop", (d.shopOpen || []).length ? [shopTodo ? `${shopTodo} to make & ship` : "", shopWait ? `${shopWait} waiting for payment` : ""].filter(Boolean).join(" · ") : "No open orders", true)}
-      ${pc("g-dusk", activeMarkets.length === 1 ? "Market open" : "Markets open", activeMarkets.length, "market", activeMarkets.length ? activeMarkets.map(m => m.name).join(", ") : "Tap to start one")}
+      ${pc("g-dusk", activeMarkets.length === 1 ? "Market open" : "Markets open", activeMarkets.length, "market", activeMarkets.length ? activeMarkets.map(m => m.name).join(", ") : nextMarket ? `Next: ${nextMarket.name}, ${shortDate(nextMarket.start_date)}` : "Tap to add one")}
     </div></div>
     ${lowCard(lowD)}
     ${attn.length ? `<h2>Needs attention</h2><div class="card">${attn.map((a, i) => `<div class="attn" data-ai="${i}"><span class="dot" style="background:${a.c}"></span><div class="grow">${esc(a.t)}<span class="small muted">${esc(a.s)}</span></div>${CHEV}</div>`).join("")}</div>` : ""}
@@ -573,7 +602,7 @@ function lowStockSheet() {
    SELL — market cashier and online orders
    ========================================================= */
 function sellTarget() {
-  const markets = state.locations.filter(l => l.type === "market" && l.active);
+  const markets = openMarkets();
   const v = state.sellAt;
   if (v === "online") return { key: "online", name: "Online orders", stockLoc: workshop()?.id, channel: "online", locationId: workshop()?.id };
   const m = markets.find(l => l.id === Number(v)) || markets[0];
@@ -647,13 +676,18 @@ function todaySummary(t) {
 
 async function renderSell() {
   const view = $("#view");
-  const markets = state.locations.filter(l => l.type === "market" && l.active);
+  const markets = openMarkets();
+  /* on a market day, open the Sell tab on that market by itself (once a day, so you can still switch away) */
+  const tdy = ymd(new Date()), todays = markets.find(m => m.start_date && m.start_date <= tdy && (m.end_date || m.start_date) >= tdy);
+  if (todays && localGet("sellAutoDay", "") !== tdy) { state.sellAt = todays.id; localSet("sellAt", todays.id); localSet("sellAutoDay", tdy); state.cart = {}; state.openGroup = null; }
   const t = sellTarget();
+  const upHtml = upcomingHtml();
   const choices = markets.map(m => `<option value="${m.id}" ${t && t.key === m.id ? "selected" : ""}>${esc(m.name)}</option>`).join("")
     + `<option value="online" ${t && t.key === "online" ? "selected" : ""}>Online orders (from workshop)</option>`;
   if (!t) {
-    view.innerHTML = `<h1 class="big">Sell at<br>the market</h1><div class="card"><h3>Start a market</h3><p class="muted">Create the market, bring stock from the workshop, then tap pieces to sell.</p><div class="btns"><button class="btn primary" id="newMarket">New market</button><button class="btn" id="goOnline">Record an online order</button><button class="btn" id="shopOrd">Shop orders</button></div></div>
-      <button type="button" class="btn block" id="pastMarkets" style="margin-top:12px">Markets &amp; analysis</button>`;
+    view.innerHTML = `<h1 class="big">Sell at<br>the market</h1><div class="card"><h3>${upcomingMarkets().length ? "No market today" : "Start a market"}</h3><p class="muted">Add a market with its dates. On the first day, this tab opens on it by itself.</p><div class="btns"><button class="btn primary" id="newMarket">New market</button><button class="btn" id="goOnline">Record an online order</button><button class="btn" id="shopOrd">Shop orders</button></div></div>
+      <button type="button" class="btn block" id="pastMarkets" style="margin-top:12px">Markets &amp; analysis</button>${upHtml}`;
+    bindUpcoming(view);
     $("#newMarket").onclick = newMarketSheet;
     $("#pastMarkets").onclick = marketsSheet;
     $("#goOnline").onclick = () => { state.sellAt = "online"; localSet("sellAt", "online"); render(); };
@@ -701,10 +735,13 @@ async function renderSell() {
       <button class="btn" id="pastMarkets">All markets</button>
       ${t.market ? `<button class="btn danger" id="endMarket">End market</button>` : ""}
     </div>
+    ${t.market && stockTotalAt(t.market.id) === 0 ? `<div class="card" style="margin:0 0 12px"><h3 style="margin-top:0">No stock at ${esc(t.market.name)} yet</h3><p class="small muted">Bring the pieces over so the counts here are right.</p>
+      <div class="btns"><button class="btn primary" id="bringAll">Bring all workshop stock</button><button class="btn" id="bringSome">Choose pieces</button></div></div>` : ""}
     <input class="search" id="search" type="search" placeholder="Search pieces" value="${esc(state.search)}">
     <div class="ttabs sell-tabs">${[["all", "All"], ...cats.map(c => [c, CAT_PLURAL[c] || c])].map(([k, l]) => `<button type="button" class="ctab ${k === "all" || k === "popular" ? "c-all" : catG(k)}" data-cat="${esc(k)}" aria-pressed="${cat === k}">${esc(l)}</button>`).join("")}</div>
     <div id="grid">${(cat === "all" ? cats : [cat]).map(c => { const gs = groups.filter(g => (g.items[0].p.category || "Other") === c); return gs.length ? (cat === "all" ? `<div class="cat-h"><span class="cat-pill ${catG(c)}">${esc(CAT_PLURAL[c] || c)}</span><b>${gs.length}</b></div>` : "") + `<div class="grid sm">${gs.map(tileHtml).join("")}</div>` : ""; }).join("") || `<div class="empty">No pieces match.</div>`}</div>
     <button type="button" class="other-btn" id="otherPiece" style="margin-top:16px">+ Other piece</button>
+    ${upHtml}
     ${n ? `<div class="cartbar">
       <div class="cb-info">
         <div class="small">${n} piece${n > 1 ? "s" : ""} · <button type="button" class="link" id="review">Details</button> · <button type="button" class="link" id="clearCart">Clear</button></div>
@@ -745,7 +782,10 @@ async function renderSell() {
   $("#pastMarkets").onclick = marketsSheet;
   $("#today").onclick = () => todaySheet(t);
   if ($("#review")) $("#review").onclick = () => reviewSheet(t);
-  if ($("#bring")) $("#bring").onclick = () => moveSheet({ to: t.market.id, from: workshop()?.id, title: `Bring stock to ${t.market.name}` });
+  if ($("#bring")) $("#bring").onclick = () => bringStockSheet(t.market);
+  if ($("#bringAll")) $("#bringAll").onclick = () => bringAllSheet(t.market);
+  if ($("#bringSome")) $("#bringSome").onclick = () => moveSheet({ to: t.market.id, from: workshop()?.id, title: `Bring stock to ${t.market.name}` });
+  bindUpcoming(view);
   if ($("#endMarket")) $("#endMarket").onclick = () => endMarketSheet(t.market);
 }
 
@@ -864,7 +904,7 @@ async function todaySheet(t) {
 async function loadMarketData() {
   const [sales, fees] = await Promise.all([
     q(live("sales", "id,sold_at,amount,qty,sku,unit_price,payment_method,location_id,channel,cart_id,client_id,notes,description").eq("channel", "market")),
-    q(live("expenses", "spent_on,amount,description,paid_to").eq("category", "Market Fee"))
+    q(live("expenses", "spent_on,amount,description,paid_to,location_id").eq("category", "Market Fee"))
   ]);
   /* sales still waiting on this phone count too */
   const local = outbox().filter(r => r.channel === "market" && !sales.some(s => s.client_id && s.client_id === r.client_id));
@@ -882,18 +922,19 @@ function marketStats(m, d) {
   Object.keys(days).forEach(k => { if (!dayList.includes(k)) dayList.push(k); });
   dayList.sort();
   const nm = m.name.toLowerCase();
-  const feeRows = d.fees.filter(f => { const t = `${f.description || ""} ${f.paid_to || ""}`.toLowerCase(); return t.includes(nm) || nm.split(/\s+/).filter(w => w.length > 2 && !/market/.test(w)).some(w => t.includes(w)); });
-  const fee = m.fee != null ? Number(m.fee) : feeRows.reduce((t, f) => t + Number(f.amount), 0);
+  const linked = d.fees.filter(f => f.location_id === m.id);
+  const feeRows = linked.length ? linked : d.fees.filter(f => { if (f.location_id) return false; const t = `${f.description || ""} ${f.paid_to || ""}`.toLowerCase(); return t.includes(nm) || nm.split(/\s+/).filter(w => w.length > 2 && !/market/.test(w)).some(w => t.includes(w)); });
+  const fee = m.cancelled_on ? feeRows.reduce((t, f) => t + Number(f.amount), 0) : m.fee != null ? Number(m.fee) : feeRows.reduce((t, f) => t + Number(f.amount), 0);
   const feeKnown = m.fee != null || feeRows.length > 0;
   const pay = {}; sl.forEach(s => { if (s.payment_method) pay[s.payment_method] = (pay[s.payment_method] || 0) + Number(s.amount); });
   const sortDate = dayList[0] || feeRows.map(f => f.spent_on).sort()[0] || "0000";
   return { m, sl, total, pieces, itemised: itemised.length > 0, imported: sl.length > 0 && !itemised.length, days, dayList, nDays: Math.max(1, dayList.length), fee, feeKnown,
-    net: total - fee, perDay: total / Math.max(1, dayList.length), pay, sortDate, running: !!m.active };
+    net: total - fee, perDay: total / Math.max(1, dayList.length), pay, sortDate, running: !!m.active && !isUpcoming(m), cancelled: !!m.cancelled_on };
 }
 async function marketsSheet() {
   let d;
   try { d = await loadMarketData(); localSet("mdata", d); } catch (e) { d = localGet("mdata", null); if (!d) return fail(e); }
-  const list = state.locations.filter(l => l.type === "market").map(m => marketStats(m, d)).sort((a, b) => b.sortDate.localeCompare(a.sortDate));
+  const list = state.locations.filter(l => l.type === "market" && !isUpcoming(l)).map(m => marketStats(m, d)).sort((a, b) => b.sortDate.localeCompare(a.sortDate));
   const withSales = list.filter(x => x.total > 0);
   const T = k => list.reduce((t, x) => t + x[k], 0);
   const best = withSales.slice().sort((a, b) => b.perDay - a.perDay)[0];
@@ -907,9 +948,9 @@ async function marketsSheet() {
       ${best ? `<div class="figure" style="grid-column:1/-1"><div class="label">Best per day</div><div class="value" style="font-size:16px">${esc(best.m.name)} · ${RM(best.perDay)} a day</div></div>` : ""}
     </div>
     <div class="list">${list.map(x => `<div class="row" data-mk="${x.m.id}"><div class="grow">
-      <div class="title" style="white-space:normal">${esc(x.m.name)}${x.running ? ` ${tag("Running", "green")}` : ""}</div>
+      <div class="title" style="white-space:normal">${esc(x.m.name)}${x.running ? ` ${tag("Running", "green")}` : ""}${x.cancelled ? ` ${tag("Cancelled", "rust")}` : ""}</div>
       <div class="small muted">${esc(dates(x))}${x.m.venue ? ` · ${esc(x.m.venue)}` : ""}</div>
-      <div class="small muted">${x.total ? `${RM(x.perDay)} a day` : x.feeKnown ? `<span style="color:var(--rust)">Fee paid, no sales recorded</span>` : "No sales recorded"}${x.feeKnown ? ` · fee ${RM(x.fee)} · after fee ${RM(x.net)}` : ""}</div></div>
+      <div class="small muted">${x.cancelled ? (x.fee > 0.004 ? `<span style="color:var(--rust)">Cancelled · ${RM(x.fee)} not refunded</span>` : "Cancelled · fully refunded") : x.total ? `${RM(x.perDay)} a day` : x.feeKnown ? `<span style="color:var(--rust)">Fee paid, no sales recorded</span>` : "No sales recorded"}${x.feeKnown && !x.cancelled ? ` · fee ${RM(x.fee)} · after fee ${RM(x.net)}` : ""}</div></div>
       <span class="num">${RM(x.total)}</span></div>`).join("") || `<div class="empty">No markets yet.</div>`}</div>`, root => {
     root.querySelectorAll("[data-mk]").forEach(r => r.onclick = () => marketDetailSheet(list.find(x => x.m.id === Number(r.dataset.mk)), list));
   });
@@ -957,7 +998,7 @@ function marketDetailSheet(x, all) {
 /* reload a market's numbers after a sale was fixed, and show its page again */
 async function refreshMarketDetail(id) {
   let d; try { d = await loadMarketData(); localSet("mdata", d); } catch (e) { return fail(e); }
-  const list = state.locations.filter(l => l.type === "market").map(m => marketStats(m, d));
+  const list = state.locations.filter(l => l.type === "market" && !isUpcoming(l)).map(m => marketStats(m, d));
   const x = list.find(y => y.m.id === id); if (x) marketDetailSheet(x, list);
 }
 /* group sale lines into sales (one cart = one sale) */
@@ -1061,20 +1102,202 @@ function newMarketSheet() {
     <form id="f">
       <label class="field"><span>Market name</span><input name="name" required placeholder="Sulap Artisan"></label>
       <label class="field"><span>Venue</span><input name="venue" placeholder="Suria Sabah"></label>
+      <p class="small muted" style="margin-top:-4px">Planned for later? Pick its dates. It waits under Upcoming until the first day.</p>
       <div class="two"><label class="field"><span>First day</span><input name="start" type="date" value="${today}"></label>
       <label class="field"><span>Last day</span><input name="end" type="date" value="${today}"></label></div>
-      <label class="field"><span>Booth fee (RM)</span><input name="fee" type="number" step="0.01" min="0" inputmode="decimal"></label>
-      <label style="display:flex;gap:8px;align-items:center;margin-bottom:12px"><input type="checkbox" name="addFee" checked style="width:auto;min-height:0"> Add the fee to expenses</label>
+      ${feeFields(null)}
       <button class="btn primary block" type="submit">Create market</button>
-    </form>`, root => root.querySelector("#f").onsubmit = async e => {
+    </form>`, root => { followEnd(root); bindFeeFields(root); root.querySelector("#f").onsubmit = async e => {
       e.preventDefault(); const f = new FormData(e.target), fee = Number(f.get("fee")) || null;
+      if (f.get("end") && f.get("start") && f.get("end") < f.get("start")) return toast("The last day is before the first day");
+      const pay = readFeePay(root, fee, 0); if (pay === false) return;
       try {
-        const [m] = await q(sb.from("locations").insert({ name: f.get("name").trim(), type: "market", venue: f.get("venue") || null, start_date: f.get("start") || null, end_date: f.get("end") || null, fee, active: true }).select());
-        if (fee && f.get("addFee")) await q(sb.from("expenses").insert({ spent_on: f.get("start") || today, expense_group: "Operating Expenses", category: "Market Fee", amount: fee, description: m.name, paid_to: f.get("venue") || m.name }));
-        state.locations.push(m); state.sellAt = m.id; localSet("sellAt", m.id); localSet("locations", state.locations);
+        const [m] = await q(sb.from("locations").insert({ name: f.get("name").trim(), type: "market", venue: f.get("venue") || null, start_date: f.get("start") || null, end_date: f.get("end") || null, fee, fee_due_on: f.get("due") || null, active: true }).select());
+        if (pay) await q(sb.from("expenses").insert({ spent_on: pay.on, expense_group: "Operating Expenses", category: "Market Fee", amount: pay.amount, description: feeDesc(m, pay.kind), paid_to: f.get("venue") || m.name, location_id: m.id }));
+        state.locations.push(m); localSet("locations", state.locations); await loadMktPays(true);
+        if (isUpcoming(m)) { closeSheet(); toast(`${m.name} added to upcoming markets${pay ? "" : " · not paid yet"}`); render(); return; }
+        state.sellAt = m.id; localSet("sellAt", m.id);
         closeSheet(); toast("Market created. Bring stock next."); render();
       } catch (err) { fail(err); }
+    }; });
+}
+/* booth fee: total, what's been paid so far (nothing / deposit / all), and when the rest is due */
+function feeFields(m) {
+  const today = ymd(new Date());
+  return `<div class="card" style="padding:14px;margin:4px 0 14px">
+      <label class="field"><span>Booth fee (RM)</span><input name="fee" type="number" step="0.01" min="0" inputmode="decimal" value="${m && m.fee != null ? m.fee : ""}"></label>
+      ${m ? "" : `<label class="field"><span>Paid so far</span></label>
+      <div class="chips" style="margin-top:-6px" id="paidHow"><button type="button" class="chip" data-ph="none" aria-pressed="true">Nothing yet</button><button type="button" class="chip" data-ph="deposit" aria-pressed="false">Deposit</button><button type="button" class="chip" data-ph="full" aria-pressed="false">Full fee</button></div>
+      <div class="two" id="payRow" hidden><label class="field"><span id="payAmtL">Deposit (RM)</span><input name="payAmt" type="number" step="0.01" min="0" inputmode="decimal"></label>
+      <label class="field"><span>Paid on</span><input name="payOn" type="date" value="${today}"></label></div>`}
+      <label class="field" style="margin-bottom:0"><span>Pay the ${m ? "rest" : "fee or balance"} by (optional)</span><input name="due" type="date" value="${m && m.fee_due_on ? m.fee_due_on : ""}"></label>
+    </div>`;
+}
+function bindFeeFields(root) {
+  const how = root.querySelector("#paidHow"); if (!how) return;
+  how.querySelectorAll("[data-ph]").forEach(b => b.onclick = () => {
+    how.querySelectorAll("[data-ph]").forEach(c => c.setAttribute("aria-pressed", c === b)); how.dataset.v = b.dataset.ph;
+    root.querySelector("#payRow").hidden = b.dataset.ph === "none";
+    root.querySelector("#payAmtL").textContent = b.dataset.ph === "full" ? "Amount paid (RM)" : "Deposit (RM)";
+    if (b.dataset.ph === "full") root.querySelector("[name=payAmt]").value = root.querySelector("[name=fee]").value;
+  });
+}
+/* what was paid in the new-market form; null = nothing, false = something's wrong */
+function readFeePay(root, fee, alreadyPaid) {
+  const how = root.querySelector("#paidHow")?.dataset.v || "none";
+  if (how === "none") return null;
+  const amount = round2(Number(root.querySelector("[name=payAmt]").value) || 0), on = root.querySelector("[name=payOn]").value || ymd(new Date());
+  if (amount <= 0) { toast("Type how much was paid"); return false; }
+  if (fee && amount + alreadyPaid > fee + 0.004) { toast("That's more than the booth fee"); return false; }
+  return { amount, on, kind: how === "deposit" && fee && amount < fee ? "deposit" : "" };
+}
+/* last day follows the first day when it would end up before it */
+function followEnd(root) {
+  const s = root.querySelector("[name=start]"), e = root.querySelector("[name=end]");
+  s.addEventListener("change", () => { if (!e.value || e.value < s.value) e.value = s.value; });
+}
+
+/* ---------- upcoming markets: list, edit, cancel, bring stock ---------- */
+function upcomingHtml() {
+  const ups = upcomingMarkets();
+  if (!ups.length) return "";
+  return `<h2>Upcoming markets</h2><div class="list">${ups.map(m => { const n = stockTotalAt(m.id), days = Math.round((new Date(m.start_date + "T00:00") - new Date(ymd(new Date()) + "T00:00")) / 864e5);
+    return `<div class="row" style="align-items:flex-start"><div class="grow"><div class="title" style="white-space:normal">${esc(m.name)}</div>
+      <div class="small muted">${esc(marketDates(m))}${m.venue ? ` · ${esc(m.venue)}` : ""} · ${days === 1 ? "tomorrow" : `in ${days} days`}</div>
+      <div class="small" style="margin-top:3px">${feeTag(m)}</div>
+      <div class="small muted">${n ? `${n} pieces packed` : "Stock not packed yet"}</div>
+      <div class="btns" style="margin:8px 0 0">${feeStatus(m).left > 0 ? `<button type="button" class="btn small" data-uppay="${m.id}">${feeStatus(m).key === "unpaid" ? "Pay booth fee" : "Pay balance"}</button>` : ""}<button type="button" class="btn small" data-upbring="${m.id}">Bring stock</button><button type="button" class="btn small" data-upedit="${m.id}">Edit</button></div></div></div>`; }).join("")}</div>
+    <p class="small muted">On the first day, the Sell tab switches to the market by itself.</p>`;
+}
+function bindUpcoming(root) {
+  root.querySelectorAll("[data-upbring]").forEach(b => b.onclick = () => bringStockSheet(loc(b.dataset.upbring)));
+  root.querySelectorAll("[data-upedit]").forEach(b => b.onclick = () => editMarketSheet(loc(b.dataset.upedit)));
+  root.querySelectorAll("[data-uppay]").forEach(b => b.onclick = () => payFeeSheet(loc(b.dataset.uppay)));
+}
+function feeTag(m) {
+  const f = feeStatus(m), col = { green: "#3f9a83", peach: "#c46a33", rust: "#cc4b45" }[f.color] || "var(--muted)";
+  return `<span style="color:${col};font-weight:600">${esc(f.label)}</span>`;
+}
+/* pay the deposit, the balance, or the whole fee */
+function payFeeSheet(m) {
+  const f = feeStatus(m);
+  openSheet(`
+    <h2>Pay booth fee · ${esc(m.name)}</h2>
+    <p class="small muted" style="margin-top:-6px">${f.total ? `Booth fee ${RM(f.total)} · paid ${RM(f.paid)} · ${RM(f.left)} left` : "No booth fee set yet."}</p>
+    <form id="f">
+      ${f.total ? "" : `<label class="field"><span>Booth fee (RM)</span><input name="fee" type="number" step="0.01" min="0" inputmode="decimal" required></label>`}
+      <div class="two"><label class="field"><span>Amount paid (RM)</span><input name="amt" type="number" step="0.01" min="0" inputmode="decimal" value="${f.left || ""}" required></label>
+      <label class="field"><span>Paid on</span><input name="on" type="date" value="${ymd(new Date())}"></label></div>
+      <p class="small muted" id="kindNote"></p>
+      <button class="btn primary block" type="submit">Save payment</button>
+    </form>`, root => {
+    const total = () => f.total || Number(root.querySelector("[name=fee]")?.value) || 0;
+    const kind = () => { const a = Number(root.querySelector("[name=amt]").value) || 0; return f.paid > 0.004 ? (a + f.paid < total() - 0.004 ? "part payment" : "balance") : a < total() - 0.004 ? "deposit" : ""; };
+    const note = () => { const k = kind(); root.querySelector("#kindNote").textContent = k === "deposit" ? "Saved as the deposit. The market counts as confirmed." : k === "balance" ? "Saved as the balance. The booth fee will be fully paid." : k ? "Saved as a part payment." : "Saved as the full booth fee."; };
+    root.querySelectorAll("input").forEach(i => i.addEventListener("input", note)); note();
+    root.querySelector("#f").onsubmit = async e => {
+      e.preventDefault(); const fd = new FormData(e.target), amt = round2(Number(fd.get("amt")) || 0), T = total();
+      if (amt <= 0) return toast("Type how much was paid");
+      if (T && amt + f.paid > T + 0.004) return toast(`That's more than the ${RM(f.left || T)} left`);
+      try {
+        if (!f.total) { await q(sb.from("locations").update({ fee: T }).eq("id", m.id)); m.fee = T; localSet("locations", state.locations); }
+        await q(sb.from("expenses").insert({ spent_on: fd.get("on") || ymd(new Date()), expense_group: "Operating Expenses", category: "Market Fee", amount: amt, description: feeDesc(m, kind()), paid_to: m.venue || m.name, location_id: m.id }));
+        await loadMktPays(); closeSheet(); toast(`${RM(amt)} booth fee saved`); render();
+      } catch (err) { fail(err); }
+    };
+  });
+}
+function bringStockSheet(m) {
+  const n = stockTotalAt(workshop().id);
+  openSheet(`
+    <h2>Bring stock to ${esc(m.name)}</h2>
+    <p class="small muted" style="margin-top:-6px">${stockTotalAt(m.id) ? `${stockTotalAt(m.id)} pieces are there already. ` : ""}The workshop has ${n} pieces.</p>
+    <button class="btn primary block" id="all" ${n ? "" : "disabled"}>Bring all workshop stock</button>
+    <button class="btn block" id="some" style="margin-top:10px">Choose pieces</button>`, root => {
+    root.querySelector("#all").onclick = () => bringAllSheet(m);
+    root.querySelector("#some").onclick = () => moveSheet({ to: m.id, from: workshop()?.id, title: `Bring stock to ${m.name}` });
+  });
+}
+function bringAllSheet(m) {
+  const W = workshop().id, rows = state.products.map(p => ({ p, n: stockAt(W, p.sku) })).filter(x => x.n > 0);
+  openSheet(`
+    <h2>Bring all to ${esc(m.name)}</h2>
+    <p>${rows.length ? `Move <b>${countWords(rows.map(x => ({ p: x.p, qty: x.n })))}</b> from the Workshop to ${esc(m.name)}?` : "The workshop has no stock to bring."}</p>
+    <p class="small muted">When you end the market, whatever is left goes back to the workshop.</p>
+    <button class="btn primary block" id="go" ${rows.length ? "" : "disabled"}>Move everything</button>`, root => root.querySelector("#go").onclick = async () => {
+      try {
+        await q(sb.from("stock_movements").insert(rows.map(x => ({ sku: x.p.sku, qty: x.n, from_location: W, to_location: m.id, reason: "transfer", moved_on: ymd(new Date()), ref: m.name }))));
+        await loadStock(); closeSheet(); toast(`Workshop stock moved to ${m.name}`); render();
+      } catch (e) { fail(e); }
     });
+}
+function editMarketSheet(m) {
+  openSheet(`
+    <h2>Edit ${esc(m.name)}</h2>
+    <form id="f">
+      <label class="field"><span>Market name</span><input name="name" required value="${esc(m.name)}"></label>
+      <label class="field"><span>Venue</span><input name="venue" value="${esc(m.venue || "")}"></label>
+      <div class="two"><label class="field"><span>First day</span><input name="start" type="date" required value="${m.start_date || ""}"></label>
+      <label class="field"><span>Last day</span><input name="end" type="date" value="${m.end_date || ""}"></label></div>
+      ${feeFields(m)}
+      <button class="btn primary block" type="submit">Save</button>
+    </form>
+    <h3 style="margin:18px 0 6px">Booth fee payments</h3>
+    <p class="small" style="margin:0 0 6px">${feeTag(m)}</p>
+    <div class="list tight">${feePays(m).map(e => `<div class="row"><div class="grow"><div class="title small">${esc(e.description || "Payment")}</div><div class="small muted">${shortDate(e.spent_on)}</div></div><span class="num">${RM(e.amount)}</span><button type="button" class="link" data-rmpay="${e.id}" style="margin-left:10px">Remove</button></div>`).join("") || `<div class="small muted" style="padding:6px 2px">Nothing paid yet.</div>`}</div>
+    ${feeStatus(m).left > 0 || !m.fee ? `<button class="btn block" id="pay" style="margin-top:10px">Add a payment</button>` : ""}
+    <button class="btn danger block" id="cancel" style="margin-top:10px">Cancel this market</button>`, root => {
+    if (root.querySelector("#pay")) root.querySelector("#pay").onclick = () => payFeeSheet(m);
+    root.querySelectorAll("[data-rmpay]").forEach(b => b.onclick = async () => {
+      if (!confirm("Remove this payment? It's taken out of expenses.")) return;
+      try { await q(sb.from("expenses").update({ deleted_at: new Date().toISOString() }).eq("id", Number(b.dataset.rmpay))); await loadMktPays(); toast("Payment removed"); editMarketSheet(m); } catch (err) { fail(err); }
+    });
+    followEnd(root);
+    root.querySelector("#f").onsubmit = async e => {
+      e.preventDefault(); const f = new FormData(e.target);
+      if (f.get("end") && f.get("end") < f.get("start")) return toast("The last day is before the first day");
+      const fee = f.get("fee") === "" ? null : round2(Number(f.get("fee")) || 0), paid = feeStatus(m).paid;
+      if (fee != null && fee < paid - 0.004) return toast(`${RM(paid)} is already paid. The fee can't be less than that.`);
+      const patch = { name: f.get("name").trim(), venue: f.get("venue") || null, start_date: f.get("start"), end_date: f.get("end") || f.get("start"), fee, fee_due_on: f.get("due") || null };
+      try {
+        await q(sb.from("locations").update(patch).eq("id", m.id));
+        if (patch.name !== m.name) for (const e of feePays(m)) if ((e.description || "").startsWith(m.name)) await q(sb.from("expenses").update({ description: patch.name + e.description.slice(m.name.length) }).eq("id", e.id));
+        await loadMktPays(true);
+        Object.assign(m, patch); localSet("locations", state.locations); closeSheet(); toast("Market updated"); render(); } catch (err) { fail(err); }
+    };
+    root.querySelector("#cancel").onclick = () => cancelMarketSheet(m);
+  });
+}
+function cancelMarketSheet(m) {
+  const left = state.products.map(p => ({ p, n: stockAt(m.id, p.sku) })).filter(x => x.n > 0), f = feeStatus(m);
+  openSheet(`
+    <h2>Cancel ${esc(m.name)}?</h2>
+    <p class="muted">It stays in your markets list, marked cancelled.${left.length ? ` The ${countWords(left.map(x => ({ p: x.p, qty: x.n })))} packed for it go back to the workshop.` : ""}</p>
+    ${f.paid > 0.004 ? `<div class="card" style="padding:14px;margin:0 0 14px">
+      <p class="small" style="margin:0 0 10px">You paid <b>${RM(f.paid)}</b> for the booth. How much did you get back?</p>
+      <div class="chips" style="margin:0 0 10px" id="rf"><button type="button" class="chip" data-rf="0" aria-pressed="true">Nothing</button><button type="button" class="chip" data-rf="${f.paid}" aria-pressed="false">All ${RM(f.paid)}</button><button type="button" class="chip" data-rf="part" aria-pressed="false">Part of it</button></div>
+      <div class="two"><label class="field"><span>Refund (RM)</span><input id="refund" type="number" step="0.01" min="0" max="${f.paid}" inputmode="decimal" value="0"></label>
+      <label class="field"><span>Refunded on</span><input id="refundOn" type="date" value="${ymd(new Date())}"></label></div>
+      <p class="small muted" style="margin:0">Whatever isn't refunded stays in expenses as money lost on this market.</p></div>` : ""}
+    <button class="btn danger block" id="go">Cancel market</button>`, root => {
+    root.querySelectorAll("[data-rf]").forEach(b => b.onclick = () => {
+      root.querySelectorAll("[data-rf]").forEach(c => c.setAttribute("aria-pressed", c === b));
+      const i = root.querySelector("#refund"); if (b.dataset.rf !== "part") i.value = b.dataset.rf; else { i.value = ""; i.focus(); }
+    });
+    root.querySelector("#go").onclick = async () => {
+      const refund = round2(Number(root.querySelector("#refund")?.value) || 0), on = root.querySelector("#refundOn")?.value || ymd(new Date());
+      if (refund < 0 || refund > f.paid + 0.004) return toast(`The refund can be up to ${RM(f.paid)}`);
+      try {
+        if (left.length) await q(sb.from("stock_movements").insert(left.map(x => ({ sku: x.p.sku, qty: x.n, from_location: m.id, to_location: workshop().id, reason: "return", moved_on: ymd(new Date()), ref: m.name, notes: "Market cancelled" }))));
+        if (refund > 0) await q(sb.from("expenses").insert({ spent_on: on, expense_group: "Operating Expenses", category: "Market Fee", amount: -refund, description: feeDesc(m, "refund"), paid_to: m.venue || m.name, location_id: m.id }));
+        const today = ymd(new Date());
+        await q(sb.from("locations").update({ active: false, cancelled_on: today }).eq("id", m.id));
+        m.active = false; m.cancelled_on = today; localSet("locations", state.locations);
+        if (String(state.sellAt) === String(m.id)) { state.sellAt = null; localSet("sellAt", null); }
+        await loadMktPays(true); await loadStock(); closeSheet(); toast(`${m.name} cancelled${refund > 0 ? ` · ${RM(refund)} refund saved` : ""}`); render();
+      } catch (e) { fail(e); }
+    };
+  });
 }
 
 function endMarketSheet(m) {
