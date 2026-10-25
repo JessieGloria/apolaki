@@ -2267,8 +2267,17 @@ function locOptions(sel, includeNone) {
 }
 
 function moveSheet({ from, to, title, restock, focus }) {
+  /* grouped by category, A to Z; each design is one row with a box per size */
   const first = new Set(focus || []);
-  const list = focus ? [...activeProducts().filter(p => first.has(p.sku)), ...activeProducts().filter(p => !first.has(p.sku))] : activeProducts();
+  const cats = groupByCategory(activeProducts()).map(([cat, ps]) => {
+    const gs = sizeGroups(ps, "all").sort((a, b) => first.size && (b.items.some(it => first.has(it.p.sku)) - a.items.some(it => first.has(it.p.sku))) || a.name.localeCompare(b.name));
+    return { cat, gs, hot: gs.some(g => g.items.some(it => first.has(it.p.sku))) };
+  });
+  const box = (it, multi) => `<label class="mv-box"><span>${esc(multi ? it.size || "—" : isPair(it.p) ? "pairs" : "qty")}</span>
+      <input type="number" inputmode="numeric" min="0" step="1" data-sku="${it.p.sku}" placeholder="0"><small data-have="${it.p.sku}"></small></label>`;
+  const design = g => { const multi = g.items.length > 1 || !!sizeShort(g.items[0].p.size), hot = g.items.some(it => first.has(it.p.sku));
+    return `<div class="mv-row${hot ? " hot" : ""}${multi ? "" : " one"}" data-name="${esc(g.name.toLowerCase())}"><div class="mv-name">${esc(g.name)}${hot ? ` <span class="tag">low</span>` : ""}${!multi && g.items[0].p.size && g.items[0].p.size !== "Free" ? `<span class="small muted"> · ${esc(g.items[0].p.size)}</span>` : ""}</div>
+      <div class="mv-boxes">${g.items.map(it => box(it, multi)).join("")}</div></div>`; };
   openSheet(`
     <h2 style="margin-top:0">${esc(title)}</h2>
     <div class="two">
@@ -2276,12 +2285,25 @@ function moveSheet({ from, to, title, restock, focus }) {
       <label class="field"><span>To</span><select id="to">${locOptions(to)}</select></label></div>
     <div class="two"><label class="field"><span>Date</span><input id="d" type="date" value="${ymd(new Date())}"></label>
     <label class="field"><span>Reference</span><input id="ref" placeholder="OCT-01"></label></div>
-    ${focus && focus.length ? `<p class="small muted" style="margin:0 0 6px">The low ones are at the top.</p>` : ""}<div class="list tight" id="pick">${list.map(p => `<div class="row" ${first.has(p.sku) ? 'style="background:var(--accent-bg)"' : ""}><div class="grow"><div class="title small">${esc(p.name)}</div><div class="small muted" data-have="${p.sku}" data-sub="${esc(itemSub(p))}"></div></div>
-      <input type="number" inputmode="numeric" min="0" step="1" data-sku="${p.sku}" style="width:80px" placeholder="0">${isPair(p) ? `<span class="small muted" style="margin-left:6px">pairs</span>` : ""}</div>`).join("")}</div>
-    ${list.some(isPair) ? `<p class="small muted">Earrings are counted in pairs: 1 = one pair.</p>` : ""}
-    <button class="btn primary block" id="go">Save</button>`, root => {
-    const showHave = () => { const f = root.querySelector("#from").value; root.querySelectorAll("[data-have]").forEach(e => e.textContent = f ? `${stockAt(Number(f), e.dataset.have)} at source` : e.dataset.sub); };
+    <input class="search" id="flt" type="search" placeholder="Search pieces">
+    <div id="pick">${cats.map(c => `<details class="group mv-cat" data-cat="${esc(c.cat)}" ${c.hot || cats.length === 1 ? "open" : ""}><summary>${catIco(c.cat)}<span class="grow">${esc(CAT_PLURAL[c.cat] || c.cat)}<span class="small muted mv-sum" style="display:block;font-weight:500">${c.gs.length} design${c.gs.length > 1 ? "s" : ""}${/earring/i.test(c.cat) ? " · counted in pairs" : ""}</span></span><span class="count" data-catn></span>${CHEV}</summary>
+      <div class="inner">${c.gs.map(design).join("")}</div></details>`).join("")}</div>
+    <div class="mv-bar"><button class="btn primary block" id="go">Save</button></div>`, root => {
+    const showHave = () => { const f = root.querySelector("#from").value; root.querySelectorAll("[data-have]").forEach(e => e.textContent = f ? `${stockAt(Number(f), e.dataset.have)} there` : ""); };
+    const total = () => {
+      const picked = [...root.querySelectorAll("[data-sku]")].map(i => ({ p: prod(i.dataset.sku), qty: parseInt(i.value, 10) || 0 })).filter(x => x.qty > 0);
+      root.querySelector("#go").textContent = picked.length ? `Save ${countWords(picked)}` : "Save";
+      root.querySelectorAll("details[data-cat]").forEach(d => { const n = [...d.querySelectorAll("[data-sku]")].reduce((t, i) => t + (parseInt(i.value, 10) || 0), 0); d.querySelector("[data-catn]").textContent = n ? `+${n}` : ""; });
+    };
     root.querySelector("#from").onchange = showHave; showHave();
+    root.querySelectorAll("[data-sku]").forEach(i => { i.oninput = () => { i.closest(".mv-box").classList.toggle("on", (parseInt(i.value, 10) || 0) > 0); total(); }; });
+    root.querySelector("#flt").oninput = e => {
+      const s = e.target.value.trim().toLowerCase();
+      root.querySelectorAll("details[data-cat]").forEach(d => {
+        let any = false; d.querySelectorAll(".mv-row").forEach(r => { const hit = !s || r.dataset.name.includes(s); r.hidden = !hit; any = any || hit; });
+        d.hidden = !any; if (s) d.open = true;
+      });
+    };
     root.querySelector("#go").onclick = async () => {
       const f = root.querySelector("#from").value, t = root.querySelector("#to").value;
       if (f && f === t) return toast("From and To are the same place");

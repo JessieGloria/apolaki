@@ -563,3 +563,21 @@ table.xt { border-collapse: separate; border-spacing: 0; font-size: 12.5px; min-
 /* ---------- running low + save lock ---------- */
 .btn.small { min-height: 34px; padding: 6px 14px; font-size: 13px; width: auto; }
 .btn[data-busy], button[data-busy] { opacity: .55; pointer-events: none; }
+
+/* ---------- add / move pieces: grouped by design, one box per size ---------- */
+.mv-cat .inner { padding-top: 4px; }
+.mv-row { padding: 10px 4px 12px; border-top: 1px solid var(--border); }
+.mv-row:first-child { border-top: 0; }
+.mv-row.hot { background: var(--accent-bg); border-radius: 12px; padding-left: 10px; padding-right: 10px; }
+.mv-name { font-weight: 600; font-size: 14px; line-height: 1.3; margin-bottom: 8px; }
+.mv-boxes { display: flex; flex-wrap: wrap; gap: 8px; }
+.mv-box { display: flex; flex-direction: column; align-items: center; width: 62px; margin: 0; }
+.mv-box span { font-size: 11px; font-weight: 700; color: var(--muted); margin-bottom: 3px; }
+.mv-box input { width: 62px; min-height: 40px; padding: 6px 4px; text-align: center; font-size: 16px; }
+.mv-box.on input { background: #fff4d6; border-color: #f2c46d; }
+.mv-box small { font-size: 10.5px; color: var(--muted); min-height: 13px; margin-top: 2px; white-space: nowrap; }
+.mv-bar { position: sticky; bottom: 0; padding: 12px 0 calc(8px + env(safe-area-inset-bottom, 0px)); background: linear-gradient(rgba(243,248,251,0), var(--bg) 35%); }
+.mv-row.one { display: flex; align-items: center; gap: 10px; }
+.mv-row.one .mv-name { flex: 1; margin: 0; }
+.mv-row.one .mv-box span { display: none; }
+.mv-row.one .mv-box small:empty { display: none; }
