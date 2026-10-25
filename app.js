@@ -1863,7 +1863,8 @@ function stockReportData(L) {
         const sizes = g.items.length > 1 || sizeShort(g.items[0].p.size) ? (together ? "all sizes" : its.map(it => `${it.size}\u00a0${it.left}`).join(", ")) : "";
         const code = shop && usesCodes(l) ? [...new Set(its.map(it => codeAt(l.id, it.p.sku)).filter(Boolean))].join(", ") : "";
         const prices = [...new Set(its.map(it => price(it.p.sku)))];
-        return { name: g.name, sizes, code, qty, price: prices.length === 1 ? prices[0] : null, value: its.reduce((t, it) => t + it.left * price(it.p.sku), 0) };
+        const lead = g.items[0].p, name = sizeShort(lead.size) ? nice(baseName(lead.short_name || lead.name)) : g.name;   /* design name; sizes have their own column */
+        return { name, sizes, code, qty, price: prices.length === 1 ? prices[0] : null, value: its.reduce((t, it) => t + it.left * price(it.p.sku), 0) };
       });
       return { cat, rows, qty: rows.reduce((t, r) => t + r.qty, 0), value: rows.reduce((t, r) => t + r.value, 0) };
     });
@@ -1892,6 +1893,95 @@ function stockReportHtml(L, data, when) {
         <tr class="tot"><td colspan="${anyCode ? 3 : 2}">Total</td><td class="r">${pl.qty}</td><td class="c-price"></td><td class="r">${RM(pl.value)}</td></tr></table>` : `<p class="small muted">No stock here.</p>`}`; }).join("")}
     <p class="rep-foot">${state.name ? `Prepared by ${esc(state.name)} · ` : ""}Values use ${data.some(pl => pl.shop) ? "each shop's price for shop stock and the original price elsewhere" : "the original price"}.</p></div>`;
 }
+
+/* ---- tiny PDF writer for the stock report (no outside library): A4, Helvetica, tables, page breaks ---- */
+const HELV = [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,278,278,278,469,556,333,556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,334,260,334,584];
+const HELVB = [278,333,474,556,556,889,722,238,333,333,389,584,278,333,278,278,556,556,556,556,556,556,556,556,556,556,333,333,584,584,584,611,975,722,722,722,722,667,611,778,722,278,556,722,611,833,722,778,667,778,722,667,611,722,667,944,667,667,611,333,278,333,584,556,333,556,611,556,611,556,333,611,611,278,278,556,278,889,611,611,611,611,389,556,333,611,556,778,556,556,500,389,280,389,584];
+/* text -> WinAnsi bytes (as a latin1 string) */
+const pdfEnc = t => String(t ?? "").replace(/ /g, " ").replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/–/g, "\x96").replace(/—/g, "\x97").replace(/−/g, "-").replace(/·/g, "\xb7").replace(/[^\x20-\x7e\x96\x97\xb7]/g, "?");
+const pdfW = (t, size, bold) => { const W = bold ? HELVB : HELV; let w = 0; for (const ch of pdfEnc(t)) { const c = ch.charCodeAt(0); w += c >= 32 && c <= 126 ? W[c - 32] : c === 0xb7 ? 278 : 556; } return w * size / 1000; };
+function pdfWrap(t, width, size, bold) {
+  const out = []; let line = "";
+  for (const word of String(t ?? "").split(/\s+/).filter(Boolean)) {
+    const tryL = line ? line + " " + word : word;
+    if (pdfW(tryL, size, bold) <= width || !line) line = tryL; else { out.push(line); line = word; }
+  }
+  if (line) out.push(line);
+  return out.length ? out : [""];
+}
+function stockReportPdf(L, data, when) {
+  const PW = 595.28, PH = 841.89, M = 40, CW = PW - 2 * M, pages = []; let ops = [], y = 0;
+  const esc = t => pdfEnc(t).replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+  const txt = (t, x, yy, size, bold, gray, align) => { const w = pdfW(t, size, bold); const xx = align === "r" ? x - w : x;
+    ops.push(`BT /${bold ? "F2" : "F1"} ${size} Tf ${gray ? "0.42 0.47 0.53 rg" : "0.1 0.12 0.15 rg"} ${xx.toFixed(2)} ${(PH - yy).toFixed(2)} Td (${esc(t)}) Tj ET`); };
+  const hline = (yy, wdt, g) => ops.push(`${g ?? 0.82} G ${wdt || 0.5} w ${M} ${(PH - yy).toFixed(2)} m ${PW - M} ${(PH - yy).toFixed(2)} l S`);
+  const box = (yy, h, g) => ops.push(`${g} g ${M} ${(PH - yy - h).toFixed(2)} ${CW} ${h.toFixed(2)} re f`);
+  const place = L === "all" ? "all places" : data[0]?.l.name || "";
+  const newPage = first => {
+    if (ops.length) pages.push(ops);
+    ops = []; y = M;
+    if (first) {
+      txt("APOLAKI", M, y + 14, 16, true); txt(`Stock report · ${place}`, M, y + 32, 11, true); txt(when, PW - M, y + 32, 9, false, true, "r");
+      hline(y + 40, 1.4, 0.1); y += 56;
+    } else { txt(`Apolaki stock report · ${place} (continued)`, M, y + 10, 9, false, true); y += 24; }
+  };
+  const need = h => { if (y + h > PH - M - 20) { newPage(false); return true; } return false; };
+  newPage(true);
+  const T = data.reduce((t, x) => t + x.qty, 0), V = data.reduce((t, x) => t + x.value, 0);
+  /* summary per place */
+  if (data.length > 1) {
+    const cols = [[M, "PLACE", ""], [M + CW - 120, "PIECES", "r"], [M + CW, "VALUE", "r"]];
+    cols.forEach(([x, h, a]) => txt(h, x, y + 10, 7.5, true, true, a)); y += 16; hline(y);
+    for (const pl of data) { txt(pl.l.name, M, y + 13, 9.5); txt(String(pl.qty), M + CW - 120, y + 13, 9.5, false, false, "r"); txt(RM(pl.value), M + CW, y + 13, 9.5, false, false, "r"); y += 19; hline(y); }
+    txt("Total", M, y + 14, 9.5, true); txt(String(T), M + CW - 120, y + 14, 9.5, true, false, "r"); txt(RM(V), M + CW, y + 14, 9.5, true, false, "r"); y += 30;
+  }
+  for (const pl of data) {
+    const anyCode = pl.cats.some(c => c.rows.some(r => r.code));
+    /* columns: [x, width, align, header, field] */
+    const C = anyCode
+      ? [[0, 160, "", "ITEM", "name"], [164, 92, "", "CODE", "code"], [260, 86, "", "SIZES", "sizes"], [350, 30, "r", "QTY", "qty"], [384, 63, "r", "PRICE", "price"], [451, 64, "r", "VALUE", "value"]]
+      : [[0, 214, "", "ITEM", "name"], [218, 128, "", "SIZES", "sizes"], [350, 30, "r", "QTY", "qty"], [384, 63, "r", "PRICE", "price"], [451, 64, "r", "VALUE", "value"]];
+    const head = () => { C.forEach(([x, w, a, h]) => txt(h, M + x + (a === "r" ? w : 0), y + 10, 7.5, true, true, a)); y += 15; hline(y, 0.6); };
+    need(60);
+    txt(pl.l.name, M, y + 14, 12, true); txt(`${pl.qty} pieces · ${RM(pl.value)}${pl.shop ? " at shop prices" : ""}`, M + pdfW(pl.l.name, 12, true) + 8, y + 14, 9, false, true); y += 24;
+    if (!pl.cats.length) { txt("No stock here.", M, y + 10, 9, false, true); y += 22; continue; }
+    head();
+    for (const c of pl.cats) {
+      if (need(40)) head();
+      box(y, 18, 0.94); txt(`${CAT_PLURAL[c.cat] || c.cat} · ${c.qty}`, M + 4, y + 12.5, 9, true); y += 18;
+      for (const r of c.rows) {
+        const vals = { name: r.name, code: r.code, sizes: r.sizes, qty: String(r.qty), price: r.price == null ? "mixed" : RM(r.price), value: RM(r.value) };
+        const cells = C.map(([x, w, a, , f]) => ({ x, w, a, lines: a === "r" ? [vals[f]] : pdfWrap(vals[f], w, 9) }));
+        const h = Math.max(...cells.map(c2 => c2.lines.length)) * 11 + 7;
+        if (need(h)) head();
+        cells.forEach(c2 => c2.lines.forEach((ln, i) => txt(ln, M + c2.x + (c2.a === "r" ? c2.w : 0), y + 12 + i * 11, 9, false, false, c2.a)));
+        y += h; hline(y, 0.4, 0.86);
+      }
+    }
+    need(26); hline(y, 1.1, 0.1);
+    const qx = C.find(c2 => c2[4] === "qty"), vx = C.find(c2 => c2[4] === "value");
+    txt("Total", M, y + 14, 9.5, true); txt(String(pl.qty), M + qx[0] + qx[1], y + 14, 9.5, true, false, "r"); txt(RM(pl.value), M + vx[0] + vx[1], y + 14, 9.5, true, false, "r"); y += 34;
+  }
+  need(20);
+  txt(`${state.name ? `Prepared by ${state.name} · ` : ""}Values use ${data.some(pl => pl.shop) ? "each shop's price for shop stock and the original price elsewhere" : "the original price"}.`, M, y + 8, 8, false, true);
+  pages.push(ops);
+  /* page numbers */
+  pages.forEach((p, i) => { ops = p; txt(`Page ${i + 1} of ${pages.length}`, PW - M, PH - M + 14, 8, false, true, "r"); });
+  /* assemble the file */
+  const objs = [];
+  const add = s2 => { objs.push(s2); return objs.length; };
+  const catalog = add(""), pagesObj = add(""), f1 = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>"), f2 = add("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>");
+  const kids = pages.map(p => { const content = p.join("\n"); const cs = add(`<< /Length ${content.length} >>\nstream\n${content}\nendstream`);
+    return add(`<< /Type /Page /Parent ${pagesObj} 0 R /MediaBox [0 0 ${PW} ${PH}] /Resources << /Font << /F1 ${f1} 0 R /F2 ${f2} 0 R >> >> /Contents ${cs} 0 R >>`); });
+  objs[catalog - 1] = `<< /Type /Catalog /Pages ${pagesObj} 0 R >>`;
+  objs[pagesObj - 1] = `<< /Type /Pages /Kids [${kids.map(k => `${k} 0 R`).join(" ")}] /Count ${kids.length} >>`;
+  let out = "%PDF-1.4\n%\xe2\xe3\xcf\xd3\n"; const offs = [];
+  objs.forEach((o, i) => { offs.push(out.length); out += `${i + 1} 0 obj\n${o}\nendobj\n`; });
+  const xref = out.length;
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n${offs.map(o => String(o).padStart(10, "0") + " 00000 n \n").join("")}trailer\n<< /Size ${objs.length + 1} /Root ${catalog} 0 R /Info << /Title (${esc(`Apolaki stock report - ${place}`)}) /Producer (Apolaki) >> >>\nstartxref\n${xref}\n%%EOF`;
+  const bytes = new Uint8Array(out.length); for (let i = 0; i < out.length; i++) bytes[i] = out.charCodeAt(i) & 255;
+  return new Blob([bytes], { type: "application/pdf" });
+}
 function stockReportSheet(L) {
   const now = new Date(), when = now.toLocaleDateString("en-MY", { day: "numeric", month: "short", year: "numeric" }) + ", " + now.toLocaleTimeString("en-MY", { hour: "numeric", minute: "2-digit" });
   const data = stockReportData(L), text = stockReportText(L, data, when), html = stockReportHtml(L, data, when);
@@ -1900,7 +1990,8 @@ function stockReportSheet(L) {
   openSheet(`
     <h2>Stock report</h2>
     <p class="small muted" style="margin-top:-6px">${L === "all" ? "All places." : `Only ${esc(data[0]?.l.name || "")}.`} To report another place, pick it on the Stock tab first.</p>
-    <div class="btns"><button class="btn primary" id="rPrint">Print / Save PDF</button>${canShare ? `<button class="btn" id="rShare">Share</button>` : ""}<button class="btn" id="rMail">Email</button></div>
+    <div class="btns"><button class="btn primary" id="rShare">${canShare ? "Share PDF" : "Download PDF"}</button><button class="btn" id="rPrint">Print</button>${canShare ? `<button class="btn" id="rDown">Download PDF</button>` : ""}</div>
+    <button type="button" class="link" id="rText" style="margin:2px 2px 10px">Share as text instead</button>
     <div class="card rep-card">${html}</div>`, root => {
     root.querySelector("#rPrint").onclick = () => {
       let area = document.getElementById("printArea"); if (!area) { area = document.createElement("div"); area.id = "printArea"; document.body.append(area); }
@@ -1908,8 +1999,20 @@ function stockReportSheet(L) {
       const done = () => { document.body.classList.remove("printing"); document.title = "Apolaki"; window.removeEventListener("afterprint", done); };
       window.addEventListener("afterprint", done); setTimeout(() => window.print(), 50);
     };
-    const sh = root.querySelector("#rShare"); if (sh) sh.onclick = async () => { try { await navigator.share({ title, text }); } catch (e) { if (e.name !== "AbortError") toast("Couldn't open sharing on this device"); } };
-    root.querySelector("#rMail").onclick = () => { location.href = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(text.slice(0, 1800) + (text.length > 1800 ? "\n… (print the report for the full list)" : ""))}`; };
+    const fileName = `Apolaki stock ${L === "all" ? "all places" : (data[0]?.l.name || "")} ${ymd(now)}.pdf`.replace(/[\/:*?"<>|]/g, "");
+    const pdfFile = () => new File([stockReportPdf(L, data, when)], fileName, { type: "application/pdf" });
+    const download = () => { const url = URL.createObjectURL(pdfFile()); const a = Object.assign(document.createElement("a"), { href: url, download: fileName }); document.body.append(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 4000); };
+    /* share the PDF itself (email, WhatsApp…); if this device can't share files, download it instead */
+    root.querySelector("#rShare").onclick = async () => {
+      const f = pdfFile();
+      if (navigator.canShare && navigator.canShare({ files: [f] })) { try { await navigator.share({ files: [f], title }); } catch (e) { if (e.name !== "AbortError") { toast("Couldn't share, so it's downloading instead"); download(); } } }
+      else download();
+    };
+    const dl = root.querySelector("#rDown"); if (dl) dl.onclick = download;
+    root.querySelector("#rText").onclick = async () => {
+      if (navigator.share) { try { await navigator.share({ title, text }); } catch (e) { if (e.name !== "AbortError") toast("Couldn't open sharing on this device"); } }
+      else location.href = `mailto:?subject=${encodeURIComponent(title)}&body=${encodeURIComponent(text.slice(0, 1800))}`;
+    };
   });
 }
 
