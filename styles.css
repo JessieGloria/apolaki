@@ -531,8 +531,6 @@ table.xt { border-collapse: separate; border-spacing: 0; font-size: 12.5px; min-
 .linkish { border: 0; background: none; padding: 0; color: var(--accent-ink); font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
 .composer textarea { background: var(--input-bg); box-shadow: none; }
 
-
-
 /* ---------- stock report (screen preview + print) ---------- */
 .rep-card { padding: 14px; overflow-x: auto; }
 .rep { font-size: 12.5px; color: var(--text); }
@@ -562,3 +560,6 @@ table.xt { border-collapse: separate; border-spacing: 0; font-size: 12.5px; min-
 }
 @media screen and (max-width: 520px) { .rep-card .c-price { display: none; } .rep-card .rep-t th, .rep-card .rep-t td { padding: 5px 4px; } }
 
+/* ---------- running low + save lock ---------- */
+.btn.small { min-height: 34px; padding: 6px 14px; font-size: 13px; width: auto; }
+.btn[data-busy], button[data-busy] { opacity: .55; pointer-events: none; }
